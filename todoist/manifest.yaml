@@ -1,0 +1,623 @@
+# The Todoist agent — one person's Todoist, read and kept through the
+# platform's gates.
+#
+# Lists tasks by project, section, label or a Todoist filter query;
+# files new tasks only under projects, sections and labels that exist;
+# changes, completes and reopens tasks as ordinary changes in the
+# person's own list; deletes and comments (a comment is seen by
+# everyone a project is shared with) only as level-3 actions. A watch
+# on completions lets a schedule wake the assistant only when
+# something was ticked off.
+#
+# Fictional demo data lives in the tests, never here.
+
+schema_version: "1.0"
+
+agent:
+  id: todoist
+  name: Todoist
+  version: "0.1.2"
+  description: >
+    Your Todoist, read and kept through the assistant. See what is due
+    today or overdue, add a task to the right project with a date and
+    a priority, tick it off or move its date, and have what you
+    completed in Todoist carried into your other lists on a schedule.
+  tags:
+    - tasks
+    - to-do
+    - todoist
+    - productivity
+  examples:
+    - title: "What is due"
+      prompt: "What is due today or overdue in my Todoist?"
+    - title: "Add a task"
+      prompt: "Add \"Order twenty desk chairs\" to my Office Move project, due next Friday, priority 1, labelled calls."
+    - title: "Keep lists in step"
+      prompt: "Every hour, check what I completed in Todoist and mark the matching items done in my Tasks list."
+  instructions: >
+    Use this agent when the user wants to see, add, change or finish
+    tasks in their Todoist. Projects, sections and labels are Todoist's
+    own: pass a name the user said or an id a list returned, and when a
+    function refuses a name it lists the real ones — ask the user which
+    they meant; never invent an id, a project, a section or a label.
+    Priorities are the app's words: P1 is the most urgent, P4 the
+    default (the API numbers them the other way round; this agent
+    converts). Dates: due_string takes Todoist's own words ("tomorrow",
+    "every Monday"), due_date takes YYYY-MM-DD. For "today", "overdue",
+    "this week" or anything Todoist's filter language says, use
+    tasks.list with query (e.g. "today | overdue", "#Office Move &
+    @calls", "p1"). A task list is at most 25 per answer; continue with
+    cursor when more is true. Completing a recurring task moves it to
+    its next date instead of finishing it — say so. Deleting a task and
+    adding a comment (which everyone the project is shared with sees)
+    need the user's explicit go-ahead and may pause for approval.
+    Keeping Todoist and the platform's Tasks list in step is two
+    agents' work, done by you: this agent cannot call the Tasks agent.
+    To copy a task across, read it from one (tasks.get here, or the
+    Tasks agent's tasks.list) and create it in the other with the same
+    title and due date, and name where it came from (the Todoist link
+    as the Tasks item's source, or the Tasks item in the Todoist
+    description). To carry over what was ticked off in Todoist, record
+    ONE completion watch (sync.watch, optionally for one project) and
+    schedule sync.completed with wake_field "completed"; each wake
+    carries only what was completed since the last check, oldest first,
+    so find the matching open Tasks item (same title, or its source is
+    the task's link) and mark it done with the Todoist link as its
+    evidence — and when nothing matches, say so rather than guessing.
+    Never record a second watch for the same request. Task ids and
+    links are Todoist's own — pass them on unchanged.
+
+implementation:
+  entrypoint: agent:TodoistAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - api.todoist.com
+
+resources:
+  secrets:
+    - id: todoist
+      label: Todoist Account
+      description: >
+        A Todoist account, connected by signing in. api_base_url is for
+        tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: todoist
+        authorize_url: https://todoist.com/oauth/authorize
+        token_url: https://todoist.com/oauth/access_token
+        # Todoist joins scopes with commas; its tokens do not expire.
+        scope_separator: ","
+        scopes:
+          - data:read_write
+          - data:delete
+        identity: {url: https://api.todoist.com/api/v1/user, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: watch
+      label: Completion Watch
+      description: >
+        How far Todoist's completions have been handed on: the completion
+        time of the newest completed task seen (Todoist's clock, UTC),
+        the task ids that sit exactly on that time, and which project
+        counts (empty for all).
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: since,      label: Read Up To,         type: string, storage: keys, required: true}
+        - {name: cursor_ids, label: Ids At That Time,   type: string, storage: keys, required: false}
+        - {name: status,     label: Status,             type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: project_id, label: Project ID,         type: string, storage: keys, required: false}
+        - {name: project,    label: Project,            type: string, storage: keys, required: false}
+        - {name: note,       label: Note,               type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Todoist account.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Todoist connection works, whose it is, and its time zone.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            full_name: {type: string}
+            timezone:  {type: string}
+            problem:   {type: string}
+
+  - id: projects
+    name: Projects
+    description: The projects tasks are filed under.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: list
+        name: List Projects
+        description: >
+          Every active project with its id, parent, whether it is shared
+          with other people, whether it is the Inbox, and a link.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [projects, total]
+          properties:
+            total: {type: integer}
+            projects:
+              type: array
+              items:
+                type: object
+                properties:
+                  project_id: {type: string}
+                  name:       {type: string}
+                  parent_id:  {type: string}
+                  shared:     {type: boolean}
+                  inbox:      {type: boolean}
+                  link:       {type: string}
+
+      - id: create
+        name: Create Project
+        description: >
+          A new project in the person's Todoist, optionally inside an
+          existing parent project (by name or id).
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:   {type: string, minLength: 1, maxLength: 120}
+            parent: {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [project_id, name]
+          properties:
+            project_id: {type: string}
+            name:       {type: string}
+            parent_id:  {type: string}
+            shared:     {type: boolean}
+            inbox:      {type: boolean}
+            link:       {type: string}
+
+  - id: sections
+    name: Sections
+    description: The sections inside projects.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: list
+        name: List Sections
+        description: Sections of one project (by name or id), or of every project.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            project: {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [sections, total]
+          properties:
+            total: {type: integer}
+            sections:
+              type: array
+              items:
+                type: object
+                properties:
+                  section_id: {type: string}
+                  name:       {type: string}
+                  project_id: {type: string}
+                  project:    {type: string}
+
+  - id: labels
+    name: Labels
+    description: The person's labels.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: list
+        name: List Labels
+        description: The person's own labels, by name.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [labels, total]
+          properties:
+            total: {type: integer}
+            labels:
+              type: array
+              items:
+                type: object
+                properties:
+                  label_id: {type: string}
+                  name:     {type: string}
+
+  - id: tasks
+    name: Tasks
+    description: Reads, files, changes and completes tasks.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: list
+        name: List Tasks
+        description: >
+          Open tasks, at most max_results (25) per answer: all of them, or
+          by project, section and label (names or ids), or by a Todoist
+          filter query such as "today | overdue" — a query cannot be
+          combined with project, section or label. Each row has its due
+          date and Todoist's due words, priority as the app shows it (P1
+          most urgent), labels, project name and link. When more is true,
+          pass next_cursor as cursor to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            project:     {type: string, maxLength: 120}
+            section:     {type: string, maxLength: 120}
+            label:       {type: string, maxLength: 120}
+            query:       {type: string, maxLength: 500}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+            cursor:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [tasks, more]
+          properties:
+            more:        {type: boolean}
+            next_cursor: {type: string}
+            tasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_id:    {type: string}
+                  content:    {type: string}
+                  project_id: {type: string}
+                  project:    {type: string}
+                  section_id: {type: string}
+                  labels:     {type: array, items: {type: string}}
+                  priority:   {type: string}
+                  due_date:   {type: string}
+                  due_string: {type: string}
+                  recurring:  {type: boolean}
+                  link:       {type: string}
+
+      - id: get
+        name: Get Task
+        description: >
+          One task with its description, how many comments it has, and
+          whether it is completed.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id]
+          properties:
+            task_id: {type: string, minLength: 1, maxLength: 100}
+        outputs:
+          type: object
+          required: [task_id, content, completed, comment_count]
+          properties:
+            task_id:       {type: string}
+            content:       {type: string}
+            description:   {type: string}
+            project_id:    {type: string}
+            project:       {type: string}
+            section_id:    {type: string}
+            parent_id:     {type: string}
+            labels:        {type: array, items: {type: string}}
+            priority:      {type: string}
+            due_date:      {type: string}
+            due_string:    {type: string}
+            recurring:     {type: boolean}
+            completed:     {type: boolean}
+            added_at:      {type: string}
+            comment_count: {type: integer}
+            link:          {type: string}
+
+      - id: create
+        name: Create Task
+        description: >
+          Add a task to the person's Todoist: content, and optionally a
+          description, project and section (names or ids that exist — an
+          unknown one is refused with the real ones listed; none means
+          the Inbox), due_string (Todoist's words) or due_date
+          (YYYY-MM-DD), priority P1–P4, and labels that exist.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [content]
+          properties:
+            content:     {type: string, minLength: 1, maxLength: 500}
+            description: {type: string, maxLength: 4000}
+            project:     {type: string, maxLength: 120}
+            section:     {type: string, maxLength: 120}
+            due_string:  {type: string, maxLength: 100}
+            due_date:    {type: string, maxLength: 10}
+            priority:    {type: string, enum: [P1, P2, P3, P4]}
+            labels:      {type: array, maxItems: 10, items: {type: string, maxLength: 60}}
+        outputs:
+          type: object
+          required: [task_id, content]
+          properties:
+            task_id:    {type: string}
+            content:    {type: string}
+            project_id: {type: string}
+            project:    {type: string}
+            section_id: {type: string}
+            labels:     {type: array, items: {type: string}}
+            priority:   {type: string}
+            due_date:   {type: string}
+            due_string: {type: string}
+            recurring:  {type: boolean}
+            link:       {type: string}
+
+      - id: update
+        name: Update Task
+        description: >
+          Change a task's content, description, due (due_string, or
+          due_string "no date" to clear it, or due_date), priority or
+          labels (the whole new set, labels that exist).
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id]
+          properties:
+            task_id:     {type: string, minLength: 1, maxLength: 100}
+            content:     {type: string, maxLength: 500}
+            description: {type: string, maxLength: 4000}
+            due_string:  {type: string, maxLength: 100}
+            due_date:    {type: string, maxLength: 10}
+            priority:    {type: string, enum: [P1, P2, P3, P4]}
+            labels:      {type: array, maxItems: 10, items: {type: string, maxLength: 60}}
+        outputs:
+          type: object
+          required: [task_id, content]
+          properties:
+            task_id:    {type: string}
+            content:    {type: string}
+            project_id: {type: string}
+            project:    {type: string}
+            section_id: {type: string}
+            labels:     {type: array, items: {type: string}}
+            priority:   {type: string}
+            due_date:   {type: string}
+            due_string: {type: string}
+            recurring:  {type: boolean}
+            link:       {type: string}
+
+      - id: complete
+        name: Complete Task
+        description: >
+          Tick a task off. A recurring task moves to its next date
+          instead (recurring is true); already says it was completed
+          before.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id]
+          properties:
+            task_id: {type: string, minLength: 1, maxLength: 100}
+        outputs:
+          type: object
+          required: [task_id, completed]
+          properties:
+            task_id:   {type: string}
+            content:   {type: string}
+            completed: {type: boolean}
+            already:   {type: boolean}
+            recurring: {type: boolean}
+
+      - id: reopen
+        name: Reopen Task
+        description: Put a completed task back on the list.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id]
+          properties:
+            task_id: {type: string, minLength: 1, maxLength: 100}
+        outputs:
+          type: object
+          required: [task_id, reopened]
+          properties:
+            task_id:  {type: string}
+            reopened: {type: boolean}
+
+      - id: delete
+        name: Delete Task
+        description: >
+          Delete a task and its sub-tasks for good. Only on the user's
+          explicit go-ahead.
+        permission_level: 3
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id]
+          properties:
+            task_id: {type: string, minLength: 1, maxLength: 100}
+        outputs:
+          type: object
+          required: [task_id, deleted]
+          properties:
+            task_id: {type: string}
+            content: {type: string}
+            deleted: {type: boolean}
+
+  - id: comments
+    name: Comments
+    description: Comments on tasks, seen by everyone the project is shared with.
+    resources:
+      secrets: [todoist]
+    functions:
+      - id: add
+        name: Add Comment
+        description: >
+          Comment on a task. Everyone the task's project is shared with
+          sees it — only on the user's explicit go-ahead.
+        permission_level: 3
+        timeout_seconds: 30
+        resources:
+          secrets: {todoist: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_id, content]
+          properties:
+            task_id: {type: string, minLength: 1, maxLength: 100}
+            content: {type: string, minLength: 1, maxLength: 4000}
+        outputs:
+          type: object
+          required: [comment_id, task_id]
+          properties:
+            comment_id: {type: string}
+            task_id:    {type: string}
+            task:       {type: string}
+            posted_at:  {type: string}
+            link:       {type: string}
+
+  - id: sync
+    name: Completions
+    description: Watches what was completed in Todoist, for a schedule to carry elsewhere.
+    resources:
+      secrets: [todoist]
+      data:    [watch]
+    functions:
+      - id: watch
+        name: Watch Completions
+        description: >
+          Start watching what is completed in Todoist — in every project,
+          or one (by name or id) — from now (or from "since", an ISO 8601
+          date-time). Record it once, then schedule sync.completed.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {todoist: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            project: {type: string, maxLength: 120}
+            since:   {type: string, maxLength: 40}
+            note:    {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, since]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            since:   {type: string}
+            project: {type: string}
+
+      - id: completed
+        name: Completed Since
+        description: >
+          What was completed in Todoist since the last check, for every
+          watch (or one, by watch_ref): one row per task, oldest first,
+          shaped like tasks.list, with its completion time, each naming
+          its watch. Moves the watch forward; "more" says a later check
+          continues. Schedule it with wake_field "completed" to be woken
+          only when something was completed.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {todoist: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, completed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            completed:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:    {type: string, x-resource: {type: data, id: watch}}
+                  task_id:      {type: string}
+                  content:      {type: string}
+                  project_id:   {type: string}
+                  project:      {type: string}
+                  section_id:   {type: string}
+                  labels:       {type: array, items: {type: string}}
+                  priority:     {type: string}
+                  due_date:     {type: string}
+                  due_string:   {type: string}
+                  recurring:    {type: boolean}
+                  completed_at: {type: string}
+                  link:         {type: string}

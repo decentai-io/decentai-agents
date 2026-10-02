@@ -1,0 +1,150 @@
+# The Code agent — writes a Python program for what a person asks,
+# shows it to them with everything it needs, and runs it when they
+# allow it.
+#
+# For the work no other agent does: a calculation over files, data
+# reshaped or merged, a chart, a file converted, a web API that has no
+# agent of its own. The program is the person's to allow: it goes to
+# them on the platform's code card with what it is for, the packages it
+# installs, the sites it reaches, the credentials it uses and the files
+# it reads, after the assistant has read it. What runs is what they
+# allowed, and it reaches what the card named and nothing else: the
+# platform opens those sites for that one run and installs those
+# packages itself.
+
+schema_version: "1.0"
+
+agent:
+  id: code_runner
+  name: Code
+  version: "0.1.1"
+  description: >
+    Writes a Python program for what you ask and runs it once you allow
+    it. You see the program first, with what it is for and everything
+    it needs: the packages it installs, the sites it reaches, the
+    credentials it uses and the files it reads. It gives back what the
+    program printed and the files it made.
+  tags:
+    - code
+    - data
+    - automation
+    - productivity
+  examples:
+    - title: "Work out something from a file"
+      prompt: "From the attached orders file, total the sales by month and tell me which month was best."
+    - title: "Make a chart"
+      prompt: "Draw a bar chart of the attached expenses by category and give me the picture."
+    - title: "Use a service that has no agent"
+      prompt: "Get the open issues of the repository octocat/Hello-World from the GitHub API and list their titles."
+  instructions: >
+    Use this agent when the work needs a program and no other installed
+    agent does it: a calculation over files, reshaping or merging data,
+    a chart, a file conversion, calling a web API. Call program.run with
+    the goal written in full: what to work out, from which files, and
+    what to give back. Pass the files by ref in files. The agent writes
+    the program, the person sees it on a card with what it needs, and it
+    runs only when they allow it; do not ask them for permission
+    yourself first. The result says how it ended. done: report what
+    output says, and never state a number the output does not show. The
+    files it made are handed to the person with your answer by the
+    platform: name them, and never write a link or an address for one. declined: the person said no; tell
+    them so and do not call again with the same request unless they ask.
+    unanswered: nobody answered the card. failed: say what went wrong in
+    the words of the result. When the result has earlier_failure, a
+    program before the last one failed and that is why another was
+    shown: say so, in its words. To change a program that already ran, call
+    again with the earlier code in code and the change in goal. The
+    program runs alone: it cannot ask the person anything, so put every
+    detail it needs in the goal. It reaches only the sites its card
+    named, and nothing inside the network the platform runs in.
+
+implementation:
+  entrypoint: agent:CodeRunnerAgent
+  dependencies: []
+
+# Where it connects: nothing of its own. A program it runs reaches the
+# sites named on the card the person allowed, for that run only — the
+# function below says so (`code: true`), and the platform does the
+# opening and the closing.
+network:
+  hosts: []
+
+resources:
+  files:
+    - id: input
+      label: Input File
+      description: A file a program reads.
+      binding: {cardinality: many, required: false}
+      constraints:
+        max_size_mb: 25  # the platform's upload limit
+    - id: output
+      label: Produced File
+      description: A file a program made.
+      binding: {cardinality: many, required: false}
+      constraints:
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: program
+    name: Program
+    description: Writes a Python program for a goal and runs it once the person allows it.
+    resources:
+      files: [input, output]
+    functions:
+      - id: run
+        name: Write And Run
+        description: >
+          Write a Python program for the goal, put it before the person
+          with what it needs, and run it when they allow it. files are
+          the files the program reads, by ref; they are in its working
+          folder under their own names. code is a program to start
+          from, for changing one that ran before. A program that fails
+          is corrected and put before the person again, up to three
+          programs in all. Returns the outcome (done, failed, declined,
+          unanswered), a summary, what the program printed, the files
+          it made, and the program itself.
+        # It makes files, so it stands where every function that makes
+        # files stands: in a chat that does not trust that far, the
+        # platform's own approval comes first. What the program does
+        # beyond that is the person's to allow on its card, each time.
+        permission_level: 2
+        timeout_seconds: 1500
+        llm: true
+        credentials: true
+        code: true
+        resources:
+          files: {input: read, output: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [goal]
+          properties:
+            goal: {type: string, minLength: 1, maxLength: 4000}
+            files:
+              type: array
+              maxItems: 10
+              items: {type: string, x-resource: {type: file, id: input}}
+            code: {type: string, maxLength: 20000}
+        outputs:
+          type: object
+          required: [outcome, summary]
+          properties:
+            outcome: {type: string, enum: [done, failed, declined, unanswered]}
+            summary: {type: string}
+            output:  {type: string}
+            purpose: {type: string}
+            code:    {type: string}
+            programs_shown: {type: integer}
+            earlier_failure: {type: string}
+            packages: {type: array, items: {type: string}}
+            hosts:    {type: array, items: {type: string}}
+            files:
+              type: array
+              items:
+                type: object
+                required: [file_ref, filename]
+                properties:
+                  file_ref: {type: string, x-resource: {type: file, id: output}}
+                  filename: {type: string}
+                  bytes:    {type: integer}
+            not_returned: {type: array, items: {type: string}}

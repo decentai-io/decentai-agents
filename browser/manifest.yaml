@@ -1,0 +1,237 @@
+# The Browser agent — a real browser, driven by the chat's model, with
+# no site-specific code. Given a goal and a page, it looks at the page
+# (a screenshot with numbered marks on everything it could act on, the
+# same elements as text, the page's words), decides one action, acts,
+# and looks again. Logins are the person's, asked for on a card and
+# saved as their secrets (call.credential); anything that reads as
+# paying, ordering, sending, deleting or publishing stops for approval;
+# the person watches the browser in the chat (call.screen) and takes it
+# over when a site wants a human — a CAPTCHA, a sign-in a script may
+# not do. Sessions and site notes are kept between runs so the second
+# visit to a site is better than the first.
+#
+# docs/system/live-screen.md in the platform repository describes the
+# screen it shows and the take-over.
+
+schema_version: "1.0"
+
+agent:
+  id: browser
+  name: Browser
+  version: "0.4.3"
+  description: >
+    Drives a real web browser to do what you ask on any site — the
+    sites nothing else covers: prefer a dedicated agent when one is
+    installed for the site. Find
+    things, fill forms, put items in a basket, read what a page says.
+    You watch it in the chat and can take over when a site wants a
+    human. Logins are asked for once and saved as your secrets; paying,
+    ordering, sending or deleting always stops for your approval.
+  tags:
+    - web
+    - browser
+    - automation
+    - productivity
+  examples:
+    - title: "Shop"
+      prompt: "Go to www.example-store.com and put two adjustable dumbbells under 500 in my basket, then show me the basket."
+    - title: "Find and compare"
+      prompt: "On www.example-travel.com, find flights to Cairo next Friday under 2000 and list the three cheapest with times."
+    - title: "Fill a form"
+      prompt: "Open https://www.example.com/support and submit a ticket saying our invoice 2041 is wrong; use my saved details."
+  instructions: >
+    Use this agent when the user wants something done on a website that
+    no other agent covers, or wants a page read as a person would see
+    it. browse.run takes the goal in the user's own words and a starting
+    address; it returns what was done, what was found (records, shown
+    as a table when there are several), the final address and a
+    screenshot. The user sees the browser live in the chat and may be
+    asked to take over — say so when the result mentions a handoff.
+    Logins are handled by the agent through the user's saved secrets:
+    never ask the user for a password in the chat. Anything that cannot
+    be taken back — paying, ordering, sending, deleting, publishing —
+    stops for the user's approval, and so does any change at all when
+    the user asked only to look: say in the goal when that is so. Tell
+    them what was approved. For data a site already holds as a list —
+    tickets, orders, rows — say in the goal what is wanted of every
+    row: the agent reads what the page fetched rather than the screen.
+    A result whose outcome is "budget" ran out
+    of steps: offer to continue with a narrower goal. browse.screenshot
+    only looks at a page and returns a picture.
+
+implementation:
+  entrypoint: agent:BrowserAgent
+  dependencies:
+    - playwright>=1.59,<1.60
+
+# Where it connects: any website — that is its work. Addresses inside
+# the network it runs in are refused by the agent itself.
+network:
+  hosts: any
+
+resources:
+  data:
+    - id: session
+      label: Browser Session
+      description: >
+        A site's cookies after a sign-in, so the next run skips the
+        form. Encrypted; keyed by the site's domain and the account.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: domain,   label: Domain,   type: string, storage: keys,   required: true}
+        - {name: account,  label: Account,  type: string, storage: keys,   required: false}
+        - {name: saved_at, label: Saved At, type: string, storage: keys,   required: true}
+        - {name: state,    label: State,    type: object, storage: values, required: true}
+
+    - id: resume
+      label: Where the Browser Was
+      description: >
+        The address a chat's browser was at when it closed, so the next
+        open or run of that chat without an address starts there.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: conversation, label: Conversation, type: string, storage: keys, required: true}
+        - {name: url,          label: Address,      type: string, storage: keys, required: true}
+        - {name: saved_at,     label: Saved At,     type: string, storage: keys, required: true}
+
+    - id: notes
+      label: Site Notes
+      description: >
+        What the agent learned about a site — where the basket is, how
+        the search works, which filters exist — read before the next run
+        there.
+      binding: {cardinality: many, required: false}
+      user_access: [update]
+      fields:
+        - {name: domain,     label: Domain,     type: string, storage: keys, required: true}
+        - {name: updated_at, label: Updated At, type: string, storage: keys, required: true}
+        - {name: notes,      label: Notes,      type: string, storage: keys, required: true}
+
+  files:
+    - id: capture
+      label: Browser Capture
+      description: A screenshot, or a file the browser downloaded.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - image/jpeg
+          - image/png
+          - application/pdf
+          - text/csv
+          - text/plain
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - application/octet-stream
+        max_size_mb: 25
+
+tools:
+  - id: browse
+    name: Browse
+    description: Drives a real browser toward a goal, or looks at one page.
+    resources:
+      data: [session, notes, resume]
+      files: [capture]
+    functions:
+      - id: run
+        name: Run
+        description: >
+          Do what the goal says in a real browser: look at the page, act,
+          look again, up to max_steps. The browser stays open after a run
+          for a while, so a follow-up in the same chat continues on the
+          page the last run left when start_url is omitted; give
+          start_url to go somewhere else or to begin. The one to
+          call for anything on a website (go somewhere and find, read,
+          compare, fill in, buy, sign in): the user watches it live in
+          the chat and may be asked to take over. Logins go through the
+          user's saved secrets; a press that cannot be taken back stops
+          for approval, as does a script the agent wants to run in the
+          page. Returns the outcome (done, stopped, failed, budget), a summary,
+          the records found, the steps taken, the final URL and a
+          screenshot's file_ref.
+        permission_level: 2
+        timeout_seconds: 1800
+        llm: true
+        credentials: true
+        resources:
+          data: {session: [list, read, create, update], notes: [list, read, create, update], resume: [list, read, create, update]}
+          files: {capture: [create, read]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [goal]
+          properties:
+            goal:      {type: string, minLength: 3, maxLength: 4000}
+            start_url: {type: string, minLength: 4, maxLength: 2000}
+            max_steps: {type: integer, minimum: 1, maximum: 200, default: 60}
+        outputs:
+          type: object
+          required: [outcome, summary, steps, final_url, records]
+          properties:
+            outcome:     {type: string, enum: [done, stopped, failed, budget]}
+            summary:     {type: string}
+            steps:       {type: integer}
+            final_url:   {type: string}
+            records:
+              type: array
+              items: {type: object}
+            approvals:   {type: array, items: {type: string}}
+            handoffs:    {type: integer}
+            file_ref:    {type: string}
+            downloads:   {type: array, items: {type: object}}
+
+      - id: watch
+        name: Watch
+        description: >
+          Show this chat's browser in the live view before anything is
+          asked of it: the page the last run left, or a blank page. The
+          user watches, takes over, types an address, signs in or goes
+          somewhere, and the next run continues from there; what they did
+          is kept on the site's notes, in words, never what they typed,
+          and a sign-in they did is kept as the site's session. Called by the platform when the
+          user opens the browser from the chat; not a step in a task.
+          With action "quit" the chat's browser is closed and where it
+          was is remembered.
+        permission_level: 0
+        timeout_seconds: 3700
+        watch: true
+        resources:
+          data: {notes: [list, read, create, update], session: [list, read, create, update], resume: [list, read, create, update]}
+          files: {}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            action: {type: string, enum: [open, quit], default: open}
+        outputs:
+          type: object
+          required: [outcome, final_url, summary]
+          properties:
+            outcome:   {type: string, enum: [closed, timeout, browser_closed, unavailable, quit]}
+            final_url: {type: string}
+            summary:   {type: string}
+
+      - id: screenshot
+        name: Screenshot
+        description: >
+          A picture of one page as a file, with its title and the address
+          it ended at. Nothing is clicked, nothing is read for the user,
+          nothing streams to the chat. Only when the user asks for a
+          screenshot of an address; every other request about a site is
+          run.
+        permission_level: 0
+        timeout_seconds: 120
+        resources:
+          files: {capture: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url: {type: string, minLength: 4, maxLength: 2000}
+        outputs:
+          type: object
+          required: [file_ref, title, final_url]
+          properties:
+            file_ref:  {type: string}
+            title:     {type: string}
+            final_url: {type: string}

@@ -1,0 +1,409 @@
+# The Documents agent — reads what people upload, compares versions,
+# fills templates, and produces Word and PDF files someone can open.
+#
+# Supported inputs: PDF (text layer), Word (.docx), plain text, Markdown
+# and CSV. A scanned PDF page has no text layer and is reported as
+# unreadable, page by page, never skipped in silence. Extraction quotes
+# its source and marks what could not be found; nothing commercial is
+# ever invented. Every produced file is read back before it is
+# returned.
+
+schema_version: "1.0"
+
+agent:
+  id: documents
+  name: Documents
+  version: "0.1.7"
+  description: >
+    Reads the PDFs, Word files and text you upload and answers with
+    page references and quoted evidence: extract the fields you name,
+    compare two versions, fill a Word template, produce a Word or PDF
+    file.
+  tags:
+    - documents
+    - pdf
+    - word
+    - productivity
+  examples:
+    - title: "Read with references"
+      prompt: "Read the attached contract and tell me the notice period and the renewal date, with page references."
+    - title: "Extract fields"
+      prompt: "Extract the invoice number, total and due date from this PDF, and quote where each came from."
+    - title: "Compare versions"
+      prompt: "Compare these two versions of the proposal and list exactly what changed."
+  instructions: >
+    Use this agent when the user attached a document or wants one
+    produced. Start with read.inspect to learn what a file is and which
+    pages are readable; then read.text for the words (by page) or
+    read.extract for named fields with quoted evidence. Quote what a
+    document says with its page; a field extract.found=false means the
+    document does not state it — say so, never fill it in. Unreadable
+    (scanned) pages are listed by number: tell the user those pages
+    could not be read. compare.versions is deterministic and shows the
+    changed passages side by side; use it before describing what
+    changed. To make a file, give produce.docx or produce.pdf the
+    sections and tables as data (never retype figures from memory —
+    take them from an extract or a stored result), and give the user
+    the file_ref. produce.fill_template reports placeholders it could
+    not fill; ask for those values rather than guessing.
+
+implementation:
+  entrypoint: agent:DocumentsAgent
+  dependencies:
+    - pypdf>=4.2,<6
+    - python-docx>=1.1,<2
+    - fpdf2>=2.7,<3
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: extract
+      label: Extraction
+      description: What was read out of which document, field by field, with its page.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: file_ref,  label: Source File, type: string, storage: keys, required: true}
+        - {name: filename,  label: Filename,    type: string, storage: keys, required: false}
+        - {name: fields,    label: Fields,      type: string, storage: keys, required: true}
+        - {name: found,     label: Found,       type: number, storage: keys, required: true}
+        - {name: missing,   label: Missing,     type: number, storage: keys, required: true}
+        - {name: result,    label: Result,      type: object, storage: values, required: false}
+
+    - id: output
+      label: Produced Document
+      description: A file this agent produced, and what it was made from.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: kind,     label: Kind,     type: select, storage: keys, required: true, options: [docx, pdf]}
+        - {name: filename, label: Filename, type: string, storage: keys, required: true}
+        - {name: file_ref, label: File,     type: string, storage: keys, required: true}
+        - {name: purpose,  label: Purpose,  type: string, storage: keys, required: false}
+        - {name: pages,    label: Pages,    type: number, storage: keys, required: false}
+
+  files:
+    - id: source
+      label: Source Document
+      description: A document to read — uploaded by a person or saved by another agent.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - text/plain
+          - text/markdown
+          - text/csv
+        max_size_mb: 25  # the platform's upload limit
+    - id: document
+      label: Produced Document
+      description: Word and PDF files this agent produced.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: read
+    name: Read
+    description: Inspects and reads documents, and extracts fields with evidence.
+    resources:
+      files: [source]
+      data:  [extract]
+    functions:
+      - id: inspect
+        name: Inspect Document
+        description: >
+          What a file is and what can be read from it: kind, page count,
+          characters per page, the pages with no text layer (scanned or
+          empty — unreadable here), and the headings of a Word file.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+        outputs:
+          type: object
+          required: [file_ref, filename, kind, pages, readable_pages, unreadable_pages, characters]
+          properties:
+            file_ref:         {type: string}
+            filename:         {type: string}
+            kind:             {type: string, enum: [pdf, docx, text, csv, markdown, unsupported]}
+            pages:            {type: integer}
+            readable_pages:   {type: array, items: {type: integer}}
+            unreadable_pages: {type: array, items: {type: integer}}
+            characters:       {type: integer}
+            headings:         {type: array, items: {type: string}}
+            problem:          {type: string}
+
+      - id: text
+        name: Read Text
+        description: >
+          The document's text, page by page, from from_page, up to
+          max_chars in total (the rest is reported as truncated — read
+          again from the next page). A Word or text file is one page.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:  {type: string, x-resource: {type: file, id: source}}
+            from_page: {type: integer, minimum: 1, default: 1}
+            max_chars: {type: integer, minimum: 500, maximum: 60000, default: 20000}
+        outputs:
+          type: object
+          required: [file_ref, filename, pages, truncated, unreadable_pages]
+          properties:
+            file_ref:  {type: string}
+            filename:  {type: string}
+            pages:
+              type: array
+              items:
+                type: object
+                properties:
+                  page: {type: integer}
+                  text: {type: string}
+            truncated:        {type: boolean}
+            next_page:        {type: integer}
+            unreadable_pages: {type: array, items: {type: integer}}
+
+      - id: extract
+        name: Extract Fields
+        description: >
+          Named fields read out of the document with the chat's model,
+          each with the passage that states it and its page. A field the
+          document does not state comes back found=false — it is never
+          invented. Every quoted passage is checked against the text;
+          one that is not there verbatim is marked unverified. The
+          extraction is recorded.
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          files: {source: read}
+          data:  {extract: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, fields]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+            fields:
+              type: array
+              minItems: 1
+              maxItems: 30
+              items:
+                type: object
+                additionalProperties: false
+                required: [name]
+                properties:
+                  name: {type: string, minLength: 1, maxLength: 60}
+                  hint: {type: string, maxLength: 300}
+            max_chars: {type: integer, minimum: 1000, maximum: 60000, default: 30000}
+        outputs:
+          type: object
+          required: [extract_ref, file_ref, fields, found, missing]
+          properties:
+            extract_ref: {type: string, x-resource: {type: data, id: extract}}
+            file_ref:    {type: string}
+            found:       {type: integer}
+            missing:     {type: integer}
+            truncated:   {type: boolean}
+            fields:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:     {type: string}
+                  found:    {type: boolean}
+                  value:    {type: string}
+                  quote:    {type: string}
+                  page:     {type: integer}
+                  verified: {type: boolean}
+
+  - id: compare
+    name: Compare
+    description: Compares two versions of a document.
+    resources:
+      files: [source]
+    functions:
+      - id: versions
+        name: Compare Versions
+        description: >
+          What changed between two documents, deterministically: each
+          added, removed or changed passage with its page in each file.
+          focus lists words (price, delivery, warranty…) whose passages
+          are put first and counted. Unreadable pages in either file are
+          named.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref_a, file_ref_b]
+          properties:
+            file_ref_a: {type: string, x-resource: {type: file, id: source}}
+            file_ref_b: {type: string, x-resource: {type: file, id: source}}
+            focus:      {type: array, maxItems: 10, items: {type: string, maxLength: 40}}
+            max_changes: {type: integer, minimum: 1, maximum: 200, default: 60}
+        outputs:
+          type: object
+          required: [identical, added, removed, changed, changes]
+          properties:
+            identical: {type: boolean}
+            added:     {type: integer}
+            removed:   {type: integer}
+            changed:   {type: integer}
+            truncated: {type: boolean}
+            focus_hits: {type: integer}
+            unreadable_a: {type: array, items: {type: integer}}
+            unreadable_b: {type: array, items: {type: integer}}
+            changes:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind:   {type: string, enum: [added, removed, changed]}
+                  page_a: {type: integer}
+                  page_b: {type: integer}
+                  before: {type: string}
+                  after:  {type: string}
+                  focus:  {type: boolean}
+
+  - id: produce
+    name: Produce
+    description: Makes Word and PDF files from data, and fills Word templates.
+    resources:
+      files: [source, document]
+      data:  [output]
+    functions:
+      - id: docx
+        name: Produce Word Document
+        description: >
+          A Word file from a title and sections. Each section has a
+          heading, paragraphs, and optionally a table given as
+          table_columns (names) and table_rows (a list of rows, each a
+          list of cell strings). The file is read back before it is
+          returned.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          files: {document: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [filename, title, sections]
+          properties:
+            filename: {type: string, minLength: 1, maxLength: 120}
+            title:    {type: string, minLength: 1, maxLength: 200}
+            purpose:  {type: string, maxLength: 200}
+            sections:
+              type: array
+              minItems: 1
+              maxItems: 40
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  heading:       {type: string, maxLength: 200}
+                  paragraphs:    {type: array, maxItems: 50, items: {type: string, maxLength: 4000}}
+                  table_columns: {type: array, maxItems: 12, items: {type: string, maxLength: 80}}
+                  table_rows:    {type: array, maxItems: 200}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, verified]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: document}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            verified:   {type: boolean}
+            paragraphs: {type: integer}
+
+      - id: pdf
+        name: Produce PDF
+        description: >
+          A PDF from the same title and sections as produce.docx (Latin
+          text; other scripts are replaced). The file is read back and
+          its page count reported.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          files: {document: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [filename, title, sections]
+          properties:
+            filename: {type: string, minLength: 1, maxLength: 120}
+            title:    {type: string, minLength: 1, maxLength: 200}
+            purpose:  {type: string, maxLength: 200}
+            sections:
+              type: array
+              minItems: 1
+              maxItems: 40
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  heading:       {type: string, maxLength: 200}
+                  paragraphs:    {type: array, maxItems: 50, items: {type: string, maxLength: 4000}}
+                  table_columns: {type: array, maxItems: 12, items: {type: string, maxLength: 80}}
+                  table_rows:    {type: array, maxItems: 200}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, verified, pages]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: document}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            verified:   {type: boolean}
+            pages:      {type: integer}
+
+      - id: fill_template
+        name: Fill Word Template
+        description: >
+          A Word template with {{placeholders}} filled from values (an
+          object of placeholder name to text), into a new file.
+          Placeholders left unfilled are listed — ask for them; nothing
+          is invented. The file is read back before it is returned.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          files: {source: read, document: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [template_ref, filename, values]
+          properties:
+            template_ref: {type: string, x-resource: {type: file, id: source}}
+            filename:     {type: string, minLength: 1, maxLength: 120}
+            purpose:      {type: string, maxLength: 200}
+            values:       {type: object, additionalProperties: true}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, filled, unfilled, verified]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: document}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            filled:     {type: array, items: {type: string}}
+            unfilled:   {type: array, items: {type: string}}
+            verified:   {type: boolean}

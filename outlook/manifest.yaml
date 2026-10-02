@@ -1,0 +1,654 @@
+# The Outlook agent — one Microsoft 365 mailbox, read and written
+# through the platform's gates, over Microsoft Graph.
+#
+# The Gmail agent's twin: the same functions, the same records and
+# the same rules — find and read, prepare replies and new messages as
+# Outlook DRAFTS, send a draft only as a level-3 action, watch a
+# conversation for a reply so a schedule can wake the assistant only
+# while the reply is still missing, and watch the inbox so a schedule
+# can wake it only when mail has arrived. What differs is the account
+# it signs into and the search syntax that account understands.
+#
+# Fictional demo data lives in the demo account, never here.
+
+schema_version: "1.0"
+
+agent:
+  id: outlook
+  name: Outlook
+  version: "0.3.2"
+  description: >
+    Your Microsoft 365 mailbox, read and answered through the
+    assistant. Find a conversation, read it whole, draft the reply and
+    see it before anything is sent; sending is a separate step you
+    approve; a watch reminds you only while a reply is still missing;
+    and an inbox watch wakes the assistant only when new mail has
+    arrived.
+  tags:
+    - email
+    - outlook
+    - microsoft
+    - productivity
+  examples:
+    - title: "Read a conversation"
+      prompt: "Find the latest email from Northlight about the chairs and read me the whole conversation."
+    - title: "Draft, do not send"
+      prompt: "Draft a reply to Dana at Harbourline saying we can furnish twenty desks by November, and show it to me before sending."
+    - title: "Remind me only if needed"
+      prompt: "Watch the Q-2041 conversation and remind me on Thursday morning if Northlight has not replied."
+    - title: "Watch the inbox"
+      prompt: "Watch my inbox for mail from harbourline.example and, whenever something arrives, read it and draft a reply for me to see."
+  instructions: >
+    Use this agent when the user wants to find, read, answer or follow
+    up on email. A person may have more than one account connected:
+    account.list names them, and every function that reads or writes
+    mail takes an optional account (the address) — pass it when the
+    user names an inbox or when the agent says several are connected;
+    a draft, a watch and an inbox watch remember the account they were
+    made on. Always find the thread first (search.find, then
+    search.thread) and quote what it actually says; never invent a
+    message, a sender, a date or an id. A reply or a new message is
+    prepared as a DRAFT (draft.reply / draft.compose) and shown to the
+    user before anything is sent; draft.send is a separate external
+    action that needs the user's explicit go-ahead and may pause for
+    approval. A send that comes back "unknown" was not confirmed by
+    Outlook — say so and do not send again; the user should check the
+    Sent folder. To be reminded when a thread has not been answered,
+    record a watch (watch.await_reply) and schedule watch.check with
+    wake_field "unanswered". To act on mail as it arrives, record an
+    inbox watch ONCE (watch.inbox — narrow it with only_from / skip_from
+    when the user names senders) and schedule watch.new_mail with
+    wake_field "messages" every few minutes; each wake carries only
+    what arrived since the last check, with its thread_id, so read the
+    thread and act on it as the user's standing instruction says. Never
+    record a second inbox watch for the same request. Search uses
+    Microsoft's KQL in query:
+    plain words, from:, to:, subject:, received>=2026-09-01,
+    hasAttachments:true, joined with AND/OR; results come most relevant
+    first. Message and thread ids and links are Outlook's own — pass
+    them on unchanged.
+
+implementation:
+  entrypoint: agent:OutlookAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - graph.microsoft.com
+
+resources:
+  secrets:
+    - id: microsoft
+      label: Microsoft Account
+      description: >
+        A Microsoft 365 account, connected by signing in. Every
+        Microsoft agent in the catalog asks for the same permissions, so
+        one saved account can be granted to each of them. The platform
+        keeps and refreshes the tokens; this agent receives a
+        short-lived access token and the address. An account connected
+        before this version needs one reconnect to add the new
+        permissions. api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: microsoft
+        authorize_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+        token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+        scopes:
+          - openid
+          - email
+          - offline_access
+          - User.Read
+          - Mail.ReadWrite
+          - Mail.Send
+          - Calendars.ReadWrite
+          - Files.ReadWrite.All
+          - Chat.ReadWrite
+          - Team.ReadBasic.All
+          - Channel.ReadBasic.All
+          - ChannelMessage.Send
+          - Tasks.ReadWrite
+        identity: {url: https://graph.microsoft.com/v1.0/me, field: userPrincipalName}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: draft
+      label: Email Draft
+      description: A reply or new message prepared in Outlook, and what became of it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: outlook_draft_id,  label: Outlook Draft ID,  type: string, storage: keys, required: true}
+        - {name: kind,            label: Kind,            type: select, storage: keys, required: true, options: [reply, new]}
+        - {name: thread_id,       label: Thread ID,       type: string, storage: keys, required: false}
+        - {name: to,              label: To,              type: string, storage: keys, required: true}
+        - {name: subject,         label: Subject,         type: string, storage: keys, required: true}
+        - {name: status,          label: Status,          type: select, storage: keys, required: true, options: [prepared, sent, unknown, discarded]}
+        - {name: account,         label: Account,         type: string, storage: keys, required: false}
+        - {name: sent_message_id, label: Sent Message ID, type: string, storage: keys, required: false}
+        - {name: body,            label: Body,            type: object, storage: values, required: false}
+
+    - id: watch
+      label: Reply Watch
+      description: A thread the user is waiting on, and where it stood when the watch began.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: thread_id,        label: Thread ID,        type: string, storage: keys, required: true}
+        - {name: subject,          label: Subject,          type: string, storage: keys, required: true}
+        - {name: since_message_id, label: Last Message Then, type: string, storage: keys, required: true}
+        - {name: status,           label: Status,           type: select, storage: keys, required: true, options: [waiting, replied, closed]}
+        - {name: account,         label: Account,         type: string, storage: keys, required: false}
+        - {name: note,             label: Note,             type: string, storage: keys, required: false}
+
+    - id: inbox
+      label: Inbox Watch
+      description: >
+        How far the inbox has been read on the user's behalf: the time of
+        the newest message handed on (Graph's clock, UTC), the ids that
+        sit exactly on that second, and which senders count.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: since,      label: Read Up To,         type: string, storage: keys, required: true}
+        - {name: cursor_ids, label: Ids At That Second, type: string, storage: keys, required: false}
+        - {name: status,     label: Status,             type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: account,         label: Account,         type: string, storage: keys, required: false}
+        - {name: only_from,  label: Only From,          type: string, storage: keys, required: false}
+        - {name: skip_from,  label: Skip From,          type: string, storage: keys, required: false}
+        - {name: note,       label: Note,               type: string, storage: keys, required: false}
+
+  files:
+    - id: attachment
+      label: Saved Attachment
+      description: An attachment saved out of a message, for another agent to read.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - text/csv
+          - text/plain
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        # What the transport can actually carry. A saved file crosses the
+        # worker wire as one line of base64, so the honest ceiling is well
+        # under a megabyte — declaring 20 promised something no attachment
+        # of that size ever survived.
+        max_size_mb: 25
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Microsoft 365 mailbox.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: status
+        name: Account Status
+        description: >
+          Confirm the Microsoft connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            account: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+      - id: list
+        name: Connected Accounts
+        description: >
+          Which accounts are connected to this agent, by address, and
+          which answers by default. When more than one is connected,
+          pass the one the user means as account on any other function.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [accounts]
+          properties:
+            accounts:
+              type: array
+              items:
+                type: object
+                properties:
+                  account: {type: string}
+                  name:    {type: string}
+                  status:  {type: string}
+                  default: {type: boolean}
+
+  - id: search
+    name: Search
+    description: Finds messages and reads threads and attachments.
+    resources:
+      secrets: [microsoft]
+      files:   [attachment]
+    functions:
+      - id: find
+        name: Find Messages
+        description: >
+          Search the mailbox with Microsoft's KQL (plain words, from:, to:,
+          subject:, received>=2026-09-01, hasAttachments:true, AND/OR).
+          Returns one row per message, most relevant first, with its
+          conversation id as thread_id and a link. Use page_token to
+          continue a long result.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            account: {type: string, maxLength: 200}
+            query:       {type: string, minLength: 1, maxLength: 500}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:  {type: string, maxLength: 4000}
+        outputs:
+          type: object
+          required: [messages, total_estimate]
+          properties:
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id: {type: string}
+                  thread_id:  {type: string}
+                  from:       {type: string}
+                  to:         {type: string}
+                  date:       {type: string}
+                  subject:    {type: string}
+                  snippet:    {type: string}
+                  link:       {type: string}
+            total_estimate:  {type: integer}
+            next_page_token: {type: string}
+
+      - id: thread
+        name: Read Thread
+        description: >
+          Read one conversation whole: every message with sender,
+          recipients, date and body text (cut at max_body_chars), and
+          the thread's attachments as one list, each naming the message
+          it belongs to and the id search.save_attachment needs.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id]
+          properties:
+            account: {type: string, maxLength: 200}
+            thread_id:      {type: string, minLength: 1, maxLength: 64}
+            max_body_chars: {type: integer, minimum: 200, maximum: 20000, default: 4000}
+            max_messages:   {type: integer, minimum: 1, maximum: 100, default: 20}
+        outputs:
+          type: object
+          required: [thread_id, subject, messages, attachments, message_count, more_messages]
+          properties:
+            thread_id:     {type: string}
+            subject:       {type: string}
+            message_count: {type: integer}
+            more_messages: {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id:  {type: string}
+                  internet_id: {type: string}
+                  from:        {type: string}
+                  to:          {type: string}
+                  cc:          {type: string}
+                  date:        {type: string}
+                  subject:     {type: string}
+                  body:        {type: string}
+                  truncated:   {type: boolean}
+                  link:        {type: string}
+            attachments:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id:    {type: string}
+                  attachment_id: {type: string}
+                  filename:      {type: string}
+                  mime_type:     {type: string}
+                  size:          {type: integer}
+
+      - id: save_attachment
+        name: Save Attachment
+        description: >
+          Save one attachment of a message as a file, so another agent
+          (Documents, Spreadsheets) can read it by file_ref. Inline
+          images are not offered; only real attachments are.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+          files:   {attachment: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [message_id, attachment_id, filename]
+          properties:
+            account: {type: string, maxLength: 200}
+            message_id:    {type: string, minLength: 1, maxLength: 400}
+            attachment_id: {type: string, minLength: 1, maxLength: 2000}
+            filename:      {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [file_ref, filename, size]
+          properties:
+            file_ref:
+              type: string
+              x-resource: {type: file, id: attachment}
+            filename: {type: string}
+            size:     {type: integer}
+
+  - id: draft
+    name: Drafts
+    description: Prepares replies and new messages as Outlook drafts, and sends one on explicit authorization.
+    resources:
+      secrets: [microsoft]
+      data:    [draft]
+    functions:
+      - id: reply
+        name: Draft Reply
+        description: >
+          Prepare a reply to a conversation as an Outlook draft, addressed
+          to the last message's sender unless "to" is given. Nothing is sent.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {draft: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id, body]
+          properties:
+            account: {type: string, maxLength: 200}
+            thread_id: {type: string, minLength: 1, maxLength: 400}
+            body:      {type: string, minLength: 1, maxLength: 20000}
+            to:        {type: string, maxLength: 500}
+            cc:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [draft_ref, outlook_draft_id, to, subject]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+            outlook_draft_id: {type: string}
+            to:             {type: string}
+            subject:        {type: string}
+            link:           {type: string}
+
+      - id: compose
+        name: Draft New Message
+        description: Prepare a new message as an Outlook draft. Nothing is sent.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {draft: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [to, subject, body]
+          properties:
+            account: {type: string, maxLength: 200}
+            to:      {type: string, minLength: 3, maxLength: 500}
+            cc:      {type: string, maxLength: 500}
+            subject: {type: string, minLength: 1, maxLength: 300}
+            body:    {type: string, minLength: 1, maxLength: 20000}
+        outputs:
+          type: object
+          required: [draft_ref, outlook_draft_id, to, subject]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+            outlook_draft_id: {type: string}
+            to:             {type: string}
+            subject:        {type: string}
+            link:           {type: string}
+
+      - id: send
+        name: Send Draft
+        description: >
+          Send a prepared draft. An external, irreversible action: only on
+          the user's explicit go-ahead. Succeeds only when Outlook confirms
+          the message left the Drafts folder; an unconfirmed outcome is
+          reported as unknown and is never retried here.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+          data:    {draft: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [draft_ref]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+        outputs:
+          type: object
+          required: [sent, status]
+          properties:
+            sent:       {type: boolean}
+            status:     {type: string, enum: [sent, unknown]}
+            message_id: {type: string}
+            thread_id:  {type: string}
+            link:       {type: string}
+
+      - id: discard
+        name: Discard Draft
+        description: Delete a prepared draft from Outlook and mark it discarded.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+          data:    {draft: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [draft_ref]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+        outputs:
+          type: object
+          required: [discarded]
+          properties:
+            discarded: {type: boolean}
+
+  - id: watch
+    name: Watches
+    description: >
+      Remembers threads the user is waiting on and checks whether they
+      were answered; remembers how far the inbox has been read and hands
+      on what arrived since.
+    resources:
+      secrets: [microsoft]
+      data:    [watch, inbox]
+    functions:
+      - id: await_reply
+        name: Await Reply
+        description: >
+          Record that the user is waiting for a reply on a thread, from
+          this moment. Pair with a schedule on watch.check.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id]
+          properties:
+            account: {type: string, maxLength: 200}
+            thread_id: {type: string, minLength: 1, maxLength: 400}
+            note:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, subject, since_message_id]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            subject:          {type: string}
+            since_message_id: {type: string}
+
+      - id: check
+        name: Check For Replies
+        description: >
+          Check every waiting watch (or one, by watch_ref) against the
+          mailbox. "unanswered" lists the threads still without a reply
+          from someone other than the account — empty once all were
+          answered. Schedule it with wake_field "unanswered" to be woken
+          only while a reply is still missing.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+        outputs:
+          type: object
+          required: [checked, unanswered, answered]
+          properties:
+            checked: {type: integer}
+            unanswered:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref: {type: string, x-resource: {type: data, id: watch}}
+                  thread_id: {type: string}
+                  subject:   {type: string}
+                  note:      {type: string}
+            answered:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:  {type: string, x-resource: {type: data, id: watch}}
+                  thread_id:  {type: string}
+                  subject:    {type: string}
+                  reply_from: {type: string}
+                  reply_date: {type: string}
+                  message_id: {type: string}
+
+      - id: inbox
+        name: Watch The Inbox
+        description: >
+          Start watching the inbox for new mail. LEAVE "since" EMPTY to
+          start from now, which is almost always what is meant. A
+          "since" is only for starting in the past, and must carry its
+          UTC offset (2026-09-20T17:51:00+04:00): a time without one is
+          read as UTC, not as the person's zone, and one in the future
+          is taken as now. Optionally count only some
+          senders: only_from / skip_from take addresses or "@domain"s,
+          comma-separated. Record it once, then schedule watch.new_mail.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {inbox: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            account: {type: string, maxLength: 200}
+            since:     {type: string, maxLength: 40}
+            only_from: {type: string, maxLength: 500}
+            skip_from: {type: string, maxLength: 500}
+            note:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [inbox_ref, since]
+          properties:
+            inbox_ref:
+              type: string
+              x-resource: {type: data, id: inbox}
+            since: {type: string}
+            note:  {type: string}
+
+      - id: new_mail
+        name: New Mail
+        description: >
+          What arrived in the inbox since the last check, for every inbox
+          watch (or one, by inbox_ref): one row per message, oldest
+          first, shaped like search.find, each naming its watch. Mail from
+          the account itself and from senders the watch leaves out is not
+          reported. Moves the watch forward; "more" says a later check
+          continues. Schedule it with wake_field "messages" to be woken
+          only when something arrived.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {microsoft: use}
+          data:    {inbox: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            inbox_ref:
+              type: string
+              x-resource: {type: data, id: inbox}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, messages, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  inbox_ref:  {type: string, x-resource: {type: data, id: inbox}}
+                  message_id: {type: string}
+                  thread_id:  {type: string}
+                  from:       {type: string}
+                  to:         {type: string}
+                  date:       {type: string}
+                  subject:    {type: string}
+                  snippet:    {type: string}
+                  link:       {type: string}

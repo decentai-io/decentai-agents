@@ -1,0 +1,477 @@
+# The Spreadsheets agent — lists cleaned, exports reconciled,
+# calculations checked, all in code.
+#
+# Reads CSV and Excel workbooks as text-preserving tables (identifiers
+# keep their leading zeros, dates stay dates, formulas are kept as
+# formulas), finds duplicates, gaps and inconsistent values, reconciles
+# two datasets by explicit matching rules, aggregates deterministically,
+# and writes a new workbook with a change log. Original files are never
+# modified. Nothing here asks a model to add up a column.
+
+schema_version: "1.0"
+
+agent:
+  id: sheets
+  name: Spreadsheets
+  version: "0.1.8"
+  description: >
+    Reads the CSV and Excel files you upload and tells you what is in
+    them and what is wrong with them: duplicates, gaps, inconsistent
+    values. Reconciles two lists by rules you state and produces a
+    clean workbook with a change log. No number is added up by a
+    model.
+  tags:
+    - spreadsheets
+    - excel
+    - csv
+    - data
+  examples:
+    - title: "Inspect a file"
+      prompt: "Inspect this spreadsheet: what columns does it have, and are there duplicates or missing values?"
+    - title: "Find the gaps"
+      prompt: "Find the rows where the unit price is missing or not a number."
+    - title: "Combine files"
+      prompt: "Put these files into one workbook, one sheet per file, with a summary of the totals."
+    - title: "Clean it"
+      prompt: "Produce a cleaned copy with duplicates removed and prices as numbers, and tell me what you changed."
+  instructions: >
+    Use this agent when the user attached a CSV or Excel file or wants
+    one produced. Start with read.inspect to see the sheets, columns
+    and what each column holds; use read.rows to look at data (it is
+    paged — read more with from_row). All arithmetic, matching and
+    de-duplication is done here in code: never add up or match rows
+    yourself. check.quality finds duplicates by the key columns you
+    name, blank required fields and values that differ only in case or
+    spacing. reconcile.match compares two files by the rules you give
+    (which column in A matches which in B, and how values are
+    normalized) and marks near-matches as uncertain — it never merges
+    two people on a guess. clean.dedupe and reconcile.match produce a
+    new workbook (the original is untouched) whose last sheet is the
+    change log; give the user its file_ref. Several files that belong
+    together — one per branch, per month, per sender — go into one
+    workbook with combine.files: pass every file_ref in one call, name
+    each sheet after where the file came from, and name total_column
+    when there is an amount to total; report the problems it lists
+    rather than fixing them silently. Say which rows were flagged
+    and why; ask before treating an uncertain match as the same person.
+
+implementation:
+  entrypoint: agent:SheetsAgent
+  dependencies:
+    - openpyxl>=3.1,<4
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: job
+      label: Spreadsheet Job
+      description: One clean-up, reconciliation or aggregation — its inputs, output and counts.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: kind,       label: Kind,        type: select, storage: keys, required: true, options: [dedupe, reconcile, aggregate, quality, combine]}
+        - {name: source_a,   label: Source A,    type: string, storage: keys, required: true}
+        - {name: source_b,   label: Source B,    type: string, storage: keys, required: false}
+        - {name: output_ref, label: Output File, type: string, storage: keys, required: false}
+        - {name: summary,    label: Summary,     type: string, storage: keys, required: true}
+
+  files:
+    - id: source
+      label: Source Sheet
+      description: A CSV or Excel file to read — uploaded by a person or saved by another agent.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - text/csv
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        max_size_mb: 25  # the platform's upload limit
+    - id: workbook
+      label: Produced Workbook
+      description: Excel files this agent produced, change log included.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: read
+    name: Read
+    description: Inspects and reads spreadsheets.
+    resources:
+      files: [source]
+    functions:
+      - id: inspect
+        name: Inspect Spreadsheet
+        description: >
+          The sheets of a file (name, rows) and one entry per column of
+          every sheet: the sheet, the name, a guessed type (text, number,
+          date, mixed, empty), how many blanks, how many formulas, and
+          whether values look like identifiers with leading zeros. The
+          header row gives the column names.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+        outputs:
+          type: object
+          required: [file_ref, filename, kind, sheets, columns]
+          properties:
+            file_ref: {type: string}
+            filename: {type: string}
+            kind:     {type: string, enum: [csv, xlsx, unsupported]}
+            problem:  {type: string}
+            sheets:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: {type: string}
+                  rows: {type: integer}
+            columns:
+              type: array
+              items:
+                type: object
+                properties:
+                  sheet:         {type: string}
+                  name:          {type: string}
+                  type:          {type: string}
+                  blanks:        {type: integer}
+                  formulas:      {type: integer}
+                  leading_zeros: {type: boolean}
+
+      - id: rows
+        name: Read Rows
+        description: >
+          Rows of one sheet as objects keyed by column name, from
+          from_row (1 = first data row), up to max_rows; next_row says
+          where to continue. Values come as text as they appear, so
+          identifiers keep their zeros; with formulas=true a formula cell
+          shows its formula.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+            sheet:    {type: string, maxLength: 100}
+            from_row: {type: integer, minimum: 1, default: 1}
+            max_rows: {type: integer, minimum: 1, maximum: 500, default: 100}
+            columns:  {type: array, maxItems: 50, items: {type: string, maxLength: 100}}
+            formulas: {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [sheet, columns, rows, total_rows, truncated]
+          properties:
+            sheet:      {type: string}
+            columns:    {type: array, items: {type: string}}
+            rows:       {type: array, items: {type: object}}
+            total_rows: {type: integer}
+            truncated:  {type: boolean}
+            next_row:   {type: integer}
+            note:       {type: string}
+
+  - id: check
+    name: Check
+    description: Finds duplicates, gaps and inconsistent values.
+    resources:
+      files: [source]
+      data:  [job]
+    functions:
+      - id: quality
+        name: Check Quality
+        description: >
+          Duplicates by key_columns (after normalization: trim, case,
+          digits-only for phone-like columns), rows with blank
+          required_columns, and values in categorical columns that differ
+          only by case or spacing. Row numbers are the sheet's own (2 =
+          first data row under the header).
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          files: {source: read}
+          data:  {job: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:         {type: string, x-resource: {type: file, id: source}}
+            sheet:            {type: string, maxLength: 100}
+            key_columns:      {type: array, maxItems: 5, items: {type: string, maxLength: 100}}
+            required_columns: {type: array, maxItems: 20, items: {type: string, maxLength: 100}}
+            categorical_columns: {type: array, maxItems: 10, items: {type: string, maxLength: 100}}
+            max_findings:     {type: integer, minimum: 1, maximum: 500, default: 100}
+        outputs:
+          type: object
+          required: [job_ref, rows, duplicate_groups, missing, inconsistent]
+          properties:
+            job_ref: {type: string, x-resource: {type: data, id: job}}
+            rows:    {type: integer}
+            truncated: {type: boolean}
+            duplicate_groups:
+              type: array
+              items:
+                type: object
+                properties:
+                  key:  {type: string}
+                  rows: {type: array, items: {type: integer}}
+            missing:
+              type: array
+              items:
+                type: object
+                properties:
+                  column: {type: string}
+                  rows:   {type: array, items: {type: integer}}
+            inconsistent:
+              type: array
+              items:
+                type: object
+                properties:
+                  column:   {type: string}
+                  variants: {type: array, items: {type: string}}
+
+  - id: reconcile
+    name: Reconcile
+    description: Matches two lists by explicit rules and writes the result.
+    resources:
+      files: [source, workbook]
+      data:  [job]
+    functions:
+      - id: match
+        name: Reconcile Two Lists
+        description: >
+          Rows of A against rows of B by keys — each key names a column
+          in A, the column in B, and how both are normalized before
+          comparing (trim, lowercase, digits, none). Exact matches on
+          every key are matched; rows matching on all but one key are
+          uncertain, never merged; the rest are only in A or only in B.
+          compare names columns to diff on matched rows. Writes a workbook
+          with sheets Matched, Only in A, Only in B, Uncertain,
+          Differences, Change Log.
+        permission_level: 2
+        timeout_seconds: 120
+        resources:
+          files: {source: read, workbook: create}
+          data:  {job: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref_a, file_ref_b, keys, filename]
+          properties:
+            file_ref_a: {type: string, x-resource: {type: file, id: source}}
+            file_ref_b: {type: string, x-resource: {type: file, id: source}}
+            sheet_a:    {type: string, maxLength: 100}
+            sheet_b:    {type: string, maxLength: 100}
+            filename:   {type: string, minLength: 1, maxLength: 120}
+            keys:
+              type: array
+              minItems: 1
+              maxItems: 5
+              items:
+                type: object
+                additionalProperties: false
+                required: [a, b]
+                properties:
+                  a:         {type: string, maxLength: 100}
+                  b:         {type: string, maxLength: 100}
+                  normalize: {type: string, enum: [trim, lowercase, digits, none], default: lowercase}
+            compare:
+              type: array
+              maxItems: 20
+              items:
+                type: object
+                additionalProperties: false
+                required: [a, b]
+                properties:
+                  a: {type: string, maxLength: 100}
+                  b: {type: string, maxLength: 100}
+        outputs:
+          type: object
+          required: [job_ref, file_ref, filename, matched, only_in_a, only_in_b, uncertain, differences, verified]
+          properties:
+            job_ref:     {type: string, x-resource: {type: data, id: job}}
+            file_ref:    {type: string, x-resource: {type: file, id: workbook}}
+            filename:    {type: string}
+            matched:     {type: integer}
+            only_in_a:   {type: integer}
+            only_in_b:   {type: integer}
+            uncertain:   {type: integer}
+            differences: {type: integer}
+            verified:    {type: boolean}
+            uncertain_pairs:
+              type: array
+              items:
+                type: object
+                properties:
+                  row_a:  {type: integer}
+                  row_b:  {type: integer}
+                  agree:  {type: string}
+                  differ: {type: string}
+
+  - id: clean
+    name: Clean
+    description: Produces a cleaned copy of a sheet.
+    resources:
+      files: [source, workbook]
+      data:  [job]
+    functions:
+      - id: dedupe
+        name: Remove Duplicates
+        description: >
+          A new workbook: sheet Clean keeps the first row of every group
+          of rows equal on key_columns (after normalization), sheet
+          Removed lists the rest with their original row numbers, sheet
+          Change Log says what was done. Identifiers, dates and formulas
+          are preserved; the original file is untouched.
+        permission_level: 2
+        timeout_seconds: 120
+        resources:
+          files: {source: read, workbook: create}
+          data:  {job: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, key_columns, filename]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: source}}
+            sheet:       {type: string, maxLength: 100}
+            key_columns: {type: array, minItems: 1, maxItems: 5, items: {type: string, maxLength: 100}}
+            normalize:   {type: string, enum: [trim, lowercase, digits, none], default: lowercase}
+            filename:    {type: string, minLength: 1, maxLength: 120}
+        outputs:
+          type: object
+          required: [job_ref, file_ref, filename, kept, removed, verified]
+          properties:
+            job_ref:  {type: string, x-resource: {type: data, id: job}}
+            file_ref: {type: string, x-resource: {type: file, id: workbook}}
+            filename: {type: string}
+            kept:     {type: integer}
+            removed:  {type: integer}
+            verified: {type: boolean}
+            removed_rows: {type: array, items: {type: integer}}
+
+  - id: combine
+    name: Combine
+    description: Puts several files into one workbook.
+    resources:
+      files: [source, workbook]
+      data:  [job]
+    functions:
+      - id: files
+        name: Combine Into Workbook
+        description: >
+          A new workbook from several CSV or Excel files: sheet Summary
+          has one line per file (rows, the total of total_column, values
+          that are not numbers, and any problem — a file that could not
+          be read, columns missing or extra against the first file),
+          sheet All holds every row with a Source column, then one sheet
+          per file as it arrived, then the Change Log. Totals are added
+          in code. The original files are untouched.
+        permission_level: 2
+        timeout_seconds: 180
+        resources:
+          files: {source: read, workbook: create}
+          data:  {job: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [files, filename]
+          properties:
+            files:
+              type: array
+              minItems: 2
+              maxItems: 40
+              items:
+                type: object
+                additionalProperties: false
+                required: [file_ref]
+                properties:
+                  file_ref:   {type: string, x-resource: {type: file, id: source}}
+                  sheet_name: {type: string, maxLength: 31}
+            total_column: {type: string, maxLength: 100}
+            filename:     {type: string, minLength: 1, maxLength: 120}
+        outputs:
+          type: object
+          required: [job_ref, file_ref, filename, combined, left_out, rows, sheets, files, verified]
+          properties:
+            job_ref:     {type: string, x-resource: {type: data, id: job}}
+            file_ref:    {type: string, x-resource: {type: file, id: workbook}}
+            filename:    {type: string}
+            combined:    {type: integer}
+            left_out:    {type: integer}
+            rows:        {type: integer}
+            grand_total: {type: [number, "null"]}
+            verified:    {type: boolean}
+            sheets:      {type: array, items: {type: string}}
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  source:       {type: string}
+                  filename:     {type: string}
+                  rows:         {type: integer}
+                  total:        {type: [number, "null"]}
+                  not_a_number: {type: integer}
+                  problem:      {type: string}
+
+  - id: calc
+    name: Calculate
+    description: Deterministic aggregation.
+    resources:
+      files: [source]
+      data:  [job]
+    functions:
+      - id: aggregate
+        name: Aggregate
+        description: >
+          Group rows by group_by columns and compute measures (sum, count,
+          avg, min, max) on numeric columns with decimal arithmetic.
+          Cells that are not numbers are skipped and counted, never
+          guessed. Totals are two decimals.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          files: {source: read}
+          data:  {job: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, measures]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+            sheet:    {type: string, maxLength: 100}
+            group_by: {type: array, maxItems: 4, items: {type: string, maxLength: 100}}
+            measures:
+              type: array
+              minItems: 1
+              maxItems: 10
+              items:
+                type: object
+                additionalProperties: false
+                required: [column, op]
+                properties:
+                  column: {type: string, maxLength: 100}
+                  op:     {type: string, enum: [sum, count, avg, min, max]}
+        outputs:
+          type: object
+          required: [job_ref, groups, rows_read, skipped_cells]
+          properties:
+            job_ref:       {type: string, x-resource: {type: data, id: job}}
+            rows_read:     {type: integer}
+            skipped_cells: {type: integer}
+            groups:        {type: array, items: {type: object}}

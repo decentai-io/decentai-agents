@@ -1,0 +1,49 @@
+{
+  "exported": "2026-10-14T06:00:00Z",
+  "source": "Sidra Office Supplies — order export",
+  "orders": [
+    {
+      "id": "SO-2041",
+      "placed": "2026-10-02",
+      "customer": {"name": "Harbourline Logistics", "city": "Dubai", "account": "0041"},
+      "status": "delivered",
+      "total": 4800.0,
+      "currency": "USD",
+      "tags": ["repeat", "priority"],
+      "lines": [
+        {"sku": "DSK-140-OAK", "description": "Height-adjustable desk 140 cm oak", "qty": 20, "unit_price": 240.0}
+      ]
+    },
+    {
+      "id": "SO-2042",
+      "placed": "2026-10-05",
+      "customer": {"name": "Cedar Office", "city": "Sharjah", "account": "0117"},
+      "status": "in transit",
+      "total": 5500.0,
+      "currency": "USD",
+      "lines": [
+        {"sku": "CHR-ARIA-BLK", "description": "Aria task chair black mesh", "qty": 20, "unit_price": 275.0}
+      ]
+    },
+    {
+      "id": "SO-2043",
+      "placed": "2026-10-09",
+      "customer": {"name": "Northlight Seating", "account": "0088"},
+      "status": "awaiting payment",
+      "currency": "USD",
+      "tags": ["new"],
+      "lines": []
+    },
+    {
+      "id": "SO-2044",
+      "placed": "2026-10-11",
+      "customer": {"name": "Marina Gate Facilities", "city": "Dubai", "account": "0203"},
+      "status": "delivered",
+      "total": 1710.0,
+      "currency": "USD",
+      "lines": [
+        {"sku": "LMP-TASK-WHT", "description": "Task lamp white", "qty": 30, "unit_price": 57.0}
+      ]
+    }
+  ]
+}

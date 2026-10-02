@@ -1,0 +1,56 @@
+# Sample data: Lina's week of 7 September 2026 at Sidra — the
+# Harbourline showroom (billable, 60-hour budget), the Riverside office
+# move, and admin — with the rules that place her meetings, and a
+# Wednesday that came up short. Friday is still to come.
+story: Sidra Office Supplies — Lina's week of 7 September across three projects, with Wednesday short.
+
+records:
+  - slot: project
+    fields: {code: SHOW, name: Harbourline showroom fit-out, client: Harbourline, billable: "yes", status: active, budget_hours: "60"}
+  - slot: project
+    fields: {code: MOVE, name: Riverside office move, billable: "no", status: active}
+  - slot: project
+    fields: {code: ADMIN, name: Admin and internal, billable: "no", status: active}
+
+  - slot: rule
+    fields: {match: Harbourline, field: title, project_code: SHOW}
+  - slot: rule
+    fields: {match: harbourline.example, field: attendee, project_code: SHOW}
+  - slot: rule
+    fields: {match: Northlight, field: title, project_code: SHOW}
+  - slot: rule
+    fields: {match: Riverside, field: title, project_code: MOVE}
+  - slot: rule
+    fields: {match: stand-up, field: title, project_code: ADMIN}
+
+  # Monday 7 September — 8 hours
+  - slot: entry
+    fields: {date: "2026-09-07", week: 2026-W37, project_code: ADMIN, hours: "0.50", note: Ops stand-up, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-07", week: 2026-W37, project_code: SHOW, hours: "3.50", note: Showroom layout review with Dana, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-07", week: 2026-W37, project_code: MOVE, hours: "2.00", note: "Movers' quotes compared", source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-07", week: 2026-W37, project_code: SHOW, hours: "2.00", note: Furniture schedule, source: manual, status: draft}
+
+  # Tuesday 8 September — 8 hours
+  - slot: entry
+    fields: {date: "2026-09-08", week: 2026-W37, project_code: ADMIN, hours: "0.50", note: Ops stand-up, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-08", week: 2026-W37, project_code: SHOW, hours: "1.00", note: Supplier call with Northlight Seating, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-08", week: 2026-W37, project_code: SHOW, hours: "5.00", note: Showroom drawings, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-08", week: 2026-W37, project_code: MOVE, hours: "1.50", note: Lease notice letter drafted, source: manual, status: draft}
+
+  # Wednesday 9 September — 2 hours: the gap
+  - slot: entry
+    fields: {date: "2026-09-09", week: 2026-W37, project_code: ADMIN, hours: "0.50", note: Ops stand-up, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-09", week: 2026-W37, project_code: MOVE, hours: "1.50", note: Walk-through at the new unit, source: manual, status: draft}
+
+  # Thursday 10 September — 8 hours
+  - slot: entry
+    fields: {date: "2026-09-10", week: 2026-W37, project_code: ADMIN, hours: "0.50", note: Ops stand-up, source: manual, status: draft}
+  - slot: entry
+    fields: {date: "2026-09-10", week: 2026-W37, project_code: SHOW, hours: "7.50", note: Site visit and snag list, source: manual, status: draft}

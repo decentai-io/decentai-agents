@@ -1,0 +1,96 @@
+# The agents this repository offers.
+#
+# DecentAI reads this file without running any of the code beneath it:
+# every path is resolved inside the checkout, every manifest is validated,
+# and nothing executes until an administrator approves an agent by name.
+
+schema_version: "1.0"
+
+catalog:
+  id: decentai_reference
+  name: DecentAI Agents
+  description: >
+    General-purpose agents anyone at work can use on the first
+    afternoon: the accounts you already work in, the files you hand
+    over, and the things you keep. Nothing ships with the platform;
+    install what a deployment needs.
+
+# An entry is an id and a path, and nothing else: what an agent is called
+# and what it does are its manifest's to say, so that there is one answer
+# rather than two that can disagree. `id` must equal the `agent.id` in the
+# manifest at `path`.
+agents:
+  - id: notebook
+    path: notebook
+  - id: gmail
+    path: gmail
+  - id: google_calendar
+    path: google_calendar
+  - id: google_drive
+    path: google_drive
+  - id: google_sheets
+    path: google_sheets
+  - id: google_forms
+    path: google_forms
+  - id: google_tasks
+    path: google_tasks
+  - id: microsoft_calendar
+    path: microsoft_calendar
+  - id: microsoft_todo
+    path: microsoft_todo
+  - id: outlook
+    path: outlook
+  - id: onedrive
+    path: onedrive
+  - id: excel_online
+    path: excel_online
+  - id: microsoft_forms
+    path: microsoft_forms
+  - id: dropbox
+    path: dropbox
+  - id: box
+    path: box
+  - id: teams
+    path: teams
+  - id: slack
+    path: slack
+  - id: notion
+    path: notion
+  - id: documents
+    path: documents
+  - id: tasks
+    path: tasks
+  - id: todoist
+    path: todoist
+  - id: timesheets
+    path: timesheets
+  - id: sheets
+    path: sheets
+  - id: expenses
+    path: expenses
+  - id: places
+    path: places
+  - id: google_docs
+    path: google_docs
+  - id: word_online
+    path: word_online
+  - id: web_reader
+    path: web_reader
+  - id: browser
+    path: browser
+  - id: web_watch
+    path: web_watch
+  - id: feeds
+    path: feeds
+  - id: applications
+    path: applications
+  - id: slides
+    path: slides
+  - id: json_data
+    path: json_data
+  - id: connection_check
+    path: connection_check
+  - id: mail
+    path: mail
+  - id: code_runner
+    path: code_runner

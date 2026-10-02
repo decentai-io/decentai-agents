@@ -1,0 +1,560 @@
+# The OneDrive agent — one Microsoft 365 OneDrive, searched, fetched,
+# filed and shared through the platform's gates, over Microsoft Graph.
+#
+# It finds files by name or folder, lists what others shared with the
+# account, says who can see a file, and brings a copy into the platform
+# for another agent to read (an Office file can come in as PDF). Every
+# change to the drive itself — uploading, making a folder, moving,
+# renaming, deleting, sharing, un-sharing — is a level-3 action that
+# waits for the user. Deleting goes to the recycle bin; a share link is
+# for the organization unless the user asks for "anyone with the link".
+
+schema_version: "1.0"
+
+agent:
+  id: onedrive
+  name: OneDrive
+  version: "0.1.8"
+  description: >
+    Your Microsoft 365 OneDrive, through the assistant. Find a file,
+    see who can open it, hand a copy to another agent to read, and file
+    or share on your go-ahead.
+  tags:
+    - files
+    - storage
+    - microsoft
+    - productivity
+  examples:
+    - title: "Find a file"
+      prompt: "Find the Riverside lease in my OneDrive and save a copy for me to read."
+    - title: "Who can see it"
+      prompt: "Who has access to the Q3 budget workbook?"
+    - title: "File and share"
+      prompt: "Put the file I just attached in Contracts and share it with dana@sidra.example, view only."
+  instructions: >
+    Use this agent to find, fetch, file or share files in a Microsoft
+    365 OneDrive. Files are addressed by item_id; take it from a search,
+    a folder listing or shared_with_me, never invent one, and pass
+    drive_id along for a file someone else shared. files.download brings
+    a copy into the platform as a file another agent (Documents, Sheets)
+    can read; as_pdf converts an Office file on the way. Uploading,
+    creating a folder, moving, renaming, deleting, sharing and
+    un-sharing change the user's drive and may pause for approval; ask
+    before each. Several files going to one folder — a batch filed, the
+    processed ones archived — are moved with one files.move_many call,
+    not one files.move each; report any it could not move. Delete moves
+    to the recycle bin — say so. sharing.link
+    makes an organization-only link unless the user explicitly asks for
+    anyone with the link; never choose anonymous on your own. People are
+    email addresses: resolve a name first (from a mail thread, or ask).
+    Before sharing, sharing.permissions shows who can already open the
+    file.
+
+implementation:
+  entrypoint: agent:OneDriveAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - graph.microsoft.com
+    # where a download is redirected to
+    - "*.sharepoint.com"
+    - "*.1drv.com"
+    - "*.microsoftpersonalcontent.com"
+    - "*.svc.ms"
+
+resources:
+  secrets:
+    - id: microsoft
+      label: Microsoft Account
+      description: >
+        A Microsoft 365 account, connected by signing in. Every
+        Microsoft agent in the catalog asks for the same permissions, so
+        one saved account can be granted to each of them. The platform
+        keeps and refreshes the tokens; this agent receives a
+        short-lived access token and the address. An account connected
+        before this version needs one reconnect to add the new
+        permissions. api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: microsoft
+        authorize_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+        token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+        scopes:
+          - openid
+          - email
+          - offline_access
+          - User.Read
+          - Mail.ReadWrite
+          - Mail.Send
+          - Calendars.ReadWrite
+          - Files.ReadWrite.All
+          - Chat.ReadWrite
+          - Team.ReadBasic.All
+          - Channel.ReadBasic.All
+          - ChannelMessage.Send
+          - Tasks.ReadWrite
+        identity: {url: https://graph.microsoft.com/v1.0/me, field: userPrincipalName}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: share
+      label: Share
+      description: Every share this agent granted or revoked, and for whom.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: item_id,       label: Item ID,       type: string, storage: keys, required: true}
+        - {name: name,          label: File,          type: string, storage: keys, required: true}
+        - {name: kind,          label: Kind,          type: select, storage: keys, required: true, options: [invite, link]}
+        - {name: who,           label: Who,           type: string, storage: keys, required: true}
+        - {name: role,          label: Role,          type: select, storage: keys, required: true, options: [read, write]}
+        - {name: link,          label: Link,          type: string, storage: keys, required: false}
+        - {name: permission_id, label: Permission ID, type: string, storage: keys, required: false}
+        - {name: status,        label: Status,        type: select, storage: keys, required: true, options: [granted, revoked]}
+
+  files:
+    - id: download
+      label: Downloaded File
+      description: A copy of a OneDrive file, brought in for another agent to read.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+          - text/csv
+          - text/plain
+          - text/markdown
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        max_size_mb: 25  # the platform's upload limit
+    - id: outgoing
+      label: File to Upload
+      description: A file in the platform — attached to the chat or saved by another agent — to put into OneDrive.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+          - text/csv
+          - text/plain
+          - text/markdown
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: account
+    name: Account
+    description: The connected drive.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: status
+        name: Drive Status
+        description: Confirm the connection and report the drive's kind and how full it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected:   {type: boolean}
+            email:       {type: string}
+            drive_type:  {type: string}
+            used_bytes:  {type: integer}
+            total_bytes: {type: integer}
+            problem:     {type: string}
+
+  - id: files
+    name: Files
+    description: Finds, fetches and files — reads freely, changes the drive only on authorization.
+    resources:
+      secrets: [microsoft]
+      files:   [download, outgoing]
+    functions:
+      - id: search
+        name: Search Files
+        description: >
+          Files and folders whose name or content matches query, across
+          the whole drive. Use page_token to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query:       {type: string, minLength: 1, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 50, default: 20}
+            page_token:  {type: string, maxLength: 2000}
+        outputs: &item_list
+          type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  item_id:     {type: string}
+                  drive_id:    {type: string}
+                  name:        {type: string}
+                  kind:        {type: string}
+                  size:        {type: integer}
+                  mime_type:   {type: string}
+                  modified:    {type: string}
+                  modified_by: {type: string}
+                  folder:      {type: string}
+                  link:        {type: string}
+                  shared:      {type: boolean}
+                  shared_by:   {type: string}
+            next_page_token: {type: string}
+
+      - id: list
+        name: List Folder
+        description: >
+          What is in a folder, by folder_path ("/", "/Contracts/2026") or
+          folder_id; the drive's top level by default.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 100, default: 50}
+            page_token:  {type: string, maxLength: 2000}
+        outputs: *item_list
+
+      - id: shared_with_me
+        name: Shared With Me
+        description: >
+          Files other people shared with the account, each with who
+          shared it and the drive_id to pass when fetching it.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            max_results: {type: integer, minimum: 1, maximum: 100, default: 25}
+        outputs: *item_list
+
+      - id: get
+        name: Get File
+        description: One file or folder's details, by item_id (and drive_id for a shared file).
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:  {type: string, minLength: 1, maxLength: 200}
+            drive_id: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: download
+        name: Download File
+        description: >
+          Bring a copy of a file into the platform, for another agent to
+          read. as_pdf converts a Word, Excel or PowerPoint file to PDF on
+          the way. Folders cannot be downloaded; files over 25 MB are
+          refused.
+        permission_level: 2
+        timeout_seconds: 90
+        resources:
+          secrets: {microsoft: use}
+          files:   {download: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:  {type: string, minLength: 1, maxLength: 200}
+            drive_id: {type: string, maxLength: 200}
+            as_pdf:   {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [file_ref, filename, size]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: download}}
+            filename: {type: string}
+            size:     {type: integer}
+
+      - id: upload
+        name: Upload File
+        description: >
+          Put a platform file (file_ref) into a OneDrive folder, under
+          its own name or name. If the folder already has a file of that
+          name, the new one is renamed unless on_conflict is "replace".
+          Changes the user's drive — only on their go-ahead.
+        permission_level: 3
+        timeout_seconds: 120
+        resources:
+          secrets: {microsoft: use}
+          files:   {outgoing: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: outgoing}}
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+            name:        {type: string, maxLength: 200}
+            on_conflict: {type: string, enum: [rename, replace, fail], default: rename}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: create_folder
+        name: Create Folder
+        description: A new folder under folder_path or folder_id. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:        {type: string, minLength: 1, maxLength: 200}
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: move
+        name: Move or Rename
+        description: >
+          Rename an item (new_name), move it to another folder
+          (to_folder_path or to_folder_id), or both. Only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:        {type: string, minLength: 1, maxLength: 200}
+            new_name:       {type: string, maxLength: 200}
+            to_folder_path: {type: string, maxLength: 400}
+            to_folder_id:   {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: move_many
+        name: Move Several
+        description: >
+          Move several items into one folder (to_folder_path or
+          to_folder_id) in one go — filing a batch, archiving what was
+          processed. Each item is moved on its own: one that fails is
+          reported with its reason and the rest still move. Only on the
+          user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 180
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_ids]
+          properties:
+            item_ids:       {type: array, minItems: 1, maxItems: 50, items: {type: string, minLength: 1, maxLength: 200}}
+            to_folder_path: {type: string, maxLength: 400}
+            to_folder_id:   {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [moved, failed, folder]
+          properties:
+            folder: {type: string}
+            moved:  {type: array, items: {type: object}}
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  item_id: {type: string}
+                  error:   {type: string}
+                  kind:    {type: string}
+
+      - id: delete
+        name: Delete
+        description: >
+          Move an item to the OneDrive recycle bin, from which the user
+          can restore it. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [deleted, name]
+          properties:
+            deleted: {type: boolean}
+            name:    {type: string}
+            note:    {type: string}
+
+  - id: sharing
+    name: Sharing
+    description: Who can open a file, and changing that on authorization.
+    resources:
+      secrets: [microsoft]
+      data:    [share]
+    functions:
+      - id: permissions
+        name: Who Has Access
+        description: >
+          Everyone who can open an item — the owner, people invited,
+          links and their reach, and access inherited from a folder.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [permissions]
+          properties:
+            permissions:
+              type: array
+              items:
+                type: object
+                properties:
+                  permission_id: {type: string}
+                  who:           {type: string}
+                  role:          {type: string}
+                  via:           {type: string}
+                  link:          {type: string}
+
+      - id: invite
+        name: Share With People
+        description: >
+          Give named people access to an item, read or write; Microsoft
+          emails them the invitation. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id, recipients]
+          properties:
+            item_id:    {type: string, minLength: 1, maxLength: 200}
+            recipients: {type: array, minItems: 1, maxItems: 20, items: {type: string, maxLength: 200}}
+            role:       {type: string, enum: [read, write], default: read}
+            message:    {type: string, maxLength: 1000}
+        outputs:
+          type: object
+          required: [share_ref, invited, role]
+          properties:
+            share_ref: {type: string, x-resource: {type: data, id: share}}
+            invited:   {type: array, items: {type: string}}
+            role:      {type: string}
+
+      - id: link
+        name: Create Share Link
+        description: >
+          A link to an item: view or edit, for people in the organization
+          (the default) or, only when the user asks for it, anyone with
+          the link. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:    {type: string, minLength: 1, maxLength: 200}
+            link_type:  {type: string, enum: [view, edit], default: view}
+            link_scope: {type: string, enum: [organization, anonymous], default: organization}
+        outputs:
+          type: object
+          required: [share_ref, link, reach]
+          properties:
+            share_ref: {type: string, x-resource: {type: data, id: share}}
+            link:      {type: string}
+            reach:     {type: string}
+
+      - id: revoke
+        name: Stop Sharing
+        description: >
+          Remove one permission (from sharing.permissions) from an item.
+          The owner's cannot be removed, nor access inherited from a
+          folder. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id, permission_id]
+          properties:
+            item_id:       {type: string, minLength: 1, maxLength: 200}
+            permission_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [revoked, share_ref]
+          properties:
+            revoked:   {type: boolean}
+            share_ref: {type: string, x-resource: {type: data, id: share}}

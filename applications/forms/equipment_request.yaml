@@ -1,0 +1,43 @@
+id: equipment_request
+title: Equipment request
+description: >
+  A request for equipment: what, for whom, why, what it costs, and who
+  approves it.
+steps:
+  - field: requester
+    label: Your full name.
+    kind: text
+    min_length: 3
+    max_length: 120
+
+  - field: item
+    label: What is needed?
+    kind: choice
+    choices: [Laptop, Monitor, Phone, Headset, Other]
+
+  - field: details
+    label: Any details — model, specification, or what "Other" means.
+    kind: text
+    required: false
+    max_length: 500
+
+  - field: justification
+    label: Why is it needed?
+    kind: text
+    min_length: 10
+    max_length: 1000
+
+  - field: needed_by
+    label: When is it needed by?
+    kind: date
+    not_before: today
+
+  - field: estimated_cost
+    label: Estimated cost, in USD.
+    kind: number
+    min: 0
+    max: 20000
+
+  - field: manager_email
+    label: The approving manager's email address.
+    kind: email

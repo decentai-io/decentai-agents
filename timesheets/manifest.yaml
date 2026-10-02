@@ -1,0 +1,511 @@
+# The Timesheets agent — where the week went, by project.
+#
+# Hours come in two ways: logged by hand (hours, or a start and an end),
+# or turned from calendar meetings — the rows the Google Calendar and
+# Microsoft Calendar agents list — by rules the user sets ("a meeting
+# with anyone at harbourline.example is the showroom project"). No rule,
+# or two rules that disagree, and the meeting comes back to be assigned;
+# nothing guesses. A week is summed by project and day with its gaps,
+# locked when it is submitted, and handed over as a workbook, which is
+# read back before it is returned. Sending it is the mail agent's job.
+
+schema_version: "1.0"
+
+agent:
+  id: timesheets
+  name: Timesheets
+  version: "0.1.4"
+  description: >
+    Where your week went, by project. Log hours, turn calendar meetings
+    into entries by your own rules, see the week's totals and gaps, lock
+    it when it is handed in, and get the workbook to send.
+  tags:
+    - timesheets
+    - time
+    - projects
+    - productivity
+  examples:
+    - title: "Log it"
+      prompt: "Log 2.5 hours on the showroom project today — layout review with Harbourline."
+    - title: "From my calendar"
+      prompt: "Turn this week's meetings into timesheet entries, and tell me which ones you could not place."
+    - title: "The week"
+      prompt: "What does my week of 7 September look like, and where are the gaps?"
+  instructions: >
+    Use this agent to keep a timesheet. Projects are addressed by short
+    code (SHOW, MOVE); projects.list shows them with hours logged
+    against any budget. Hours are decimal (1.5) or a start and end time
+    (HH:MM); dates are YYYY-MM-DD; a week is an ISO week like 2026-W37.
+    To log meetings, list them with a calendar agent first and pass the
+    rows unchanged to entries.from_events; the user's rules place them,
+    and the ones it returns as unassigned must be put to the user —
+    never pick a project yourself. Pass the user's answers back as
+    assign, an event_id and project_code for each; a meeting already
+    logged is never logged twice. weeks.summary shows the week and its gaps; weeks.submit locks
+    it, and a submitted week changes only after weeks.reopen.
+    weeks.workbook produces the file to send; sending it is the mail
+    agent's job.
+
+implementation:
+  entrypoint: agent:TimesheetsAgent
+  dependencies:
+    - openpyxl>=3.1,<4
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: project
+      label: Project
+      description: Something time is logged against.
+      binding: {cardinality: many, required: false}
+      user_access: [create, update]
+      fields:
+        - {name: code,         label: Code,         type: string, storage: keys, required: true}
+        - {name: name,         label: Name,         type: string, storage: keys, required: true}
+        - {name: client,       label: Client,       type: string, storage: keys, required: false}
+        - {name: billable,     label: Billable,     type: select, storage: keys, required: true, options: ["yes", "no"]}
+        - {name: status,       label: Status,       type: select, storage: keys, required: true, options: [active, archived]}
+        - {name: budget_hours, label: Budget Hours, type: string, storage: keys, required: false}
+
+    - id: rule
+      label: Rule
+      description: Places a meeting on a project when its title, an attendee or its location contains the text.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: match,        label: Contains, type: string, storage: keys, required: true}
+        - {name: field,        label: In,       type: select, storage: keys, required: true, options: [title, attendee, location]}
+        - {name: project_code, label: Project,  type: string, storage: keys, required: true}
+
+    - id: entry
+      label: Time Entry
+      description: Hours on one project on one day.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: date,         label: Date,     type: string, storage: keys, required: true}
+        - {name: week,         label: Week,     type: string, storage: keys, required: true}
+        - {name: project_code, label: Project,  type: string, storage: keys, required: true}
+        - {name: hours,        label: Hours,    type: string, storage: keys, required: true}
+        - {name: note,         label: Note,     type: string, storage: keys, required: false}
+        - {name: source,       label: Source,   type: select, storage: keys, required: true, options: [manual, calendar]}
+        - {name: event_id,     label: Event ID, type: string, storage: keys, required: false}
+        - {name: status,       label: Status,   type: select, storage: keys, required: true, options: [draft, submitted]}
+
+    - id: week
+      label: Week
+      description: A week handed in, and when.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: week,         label: Week,         type: string, storage: keys, required: true}
+        - {name: status,       label: Status,       type: select, storage: keys, required: true, options: [open, submitted]}
+        - {name: submitted_on, label: Submitted On, type: string, storage: keys, required: false}
+        - {name: total_hours,  label: Total Hours,  type: string, storage: keys, required: false}
+
+  files:
+    - id: workbook
+      label: Timesheet Workbook
+      description: A week's timesheet as an Excel workbook, read back before it is returned.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types: [application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: projects
+    name: Projects
+    description: The projects time goes on, and the rules that place meetings on them.
+    resources:
+      data: [project, rule, entry]
+    functions:
+      - id: add
+        name: Add Project
+        description: A new project, by short code. Billable unless said otherwise.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {project: [list, create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [code, name]
+          properties:
+            code:         {type: string, minLength: 1, maxLength: 20}
+            name:         {type: string, minLength: 1, maxLength: 200}
+            client:       {type: string, maxLength: 200}
+            billable:     {type: boolean, default: true}
+            budget_hours: {type: number, minimum: 0}
+        outputs:
+          type: object
+          required: [project]
+          properties:
+            project: {type: object}
+
+      - id: list
+        name: List Projects
+        description: Active projects (and archived ones on request), with hours logged and any budget left.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          data: {project: [list], entry: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            include_archived: {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [projects]
+          properties:
+            projects: {type: array, items: {type: object}}
+
+      - id: update
+        name: Update Project
+        description: Rename, re-client, change billable or budget, or archive a project.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {project: [list, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code:         {type: string, minLength: 1, maxLength: 20}
+            name:         {type: string, maxLength: 200}
+            client:       {type: string, maxLength: 200}
+            billable:     {type: boolean}
+            status:       {type: string, enum: [active, archived]}
+            budget_hours: {type: number, minimum: 0}
+        outputs:
+          type: object
+          required: [project]
+          properties:
+            project: {type: object}
+
+      - id: add_rule
+        name: Add Rule
+        description: >
+          Place meetings on a project when their title (the default), an
+          attendee's address, or the location contains match.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {project: [list], rule: [list, create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [match, project_code]
+          properties:
+            match:        {type: string, minLength: 1, maxLength: 100}
+            field:        {type: string, enum: [title, attendee, location], default: title}
+            project_code: {type: string, minLength: 1, maxLength: 20}
+        outputs:
+          type: object
+          required: [rule_ref]
+          properties:
+            rule_ref:     {type: string, x-resource: {type: data, id: rule}}
+            match:        {type: string}
+            field:        {type: string}
+            project_code: {type: string}
+
+      - id: rules
+        name: List Rules
+        description: The rules that place meetings on projects.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          data: {rule: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [rules]
+          properties:
+            rules: {type: array, items: {type: object}}
+
+      - id: remove_rule
+        name: Remove Rule
+        description: Stop a rule placing meetings. Entries it placed stay.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {rule: [delete]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [rule_ref]
+          properties:
+            rule_ref: {type: string, x-resource: {type: data, id: rule}}
+        outputs:
+          type: object
+          required: [removed]
+          properties:
+            removed:  {type: boolean}
+            rule_ref: {type: string}
+
+  - id: entries
+    name: Entries
+    description: Hours in — by hand, or from calendar meetings by the user's rules.
+    resources:
+      data: [entry, project, rule, week]
+    functions:
+      - id: log
+        name: Log Time
+        description: >
+          Hours on a project on a day (today by default): hours, or a
+          start and end time rounded to the quarter hour. A day holds at
+          most 24 hours; a submitted week takes nothing new.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {entry: [list, create], project: [list], week: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [project_code]
+          properties:
+            project_code: {type: string, minLength: 1, maxLength: 20}
+            date:         {type: string, maxLength: 10}
+            hours:        {type: number, minimum: 0, maximum: 24}
+            start:        {type: string, maxLength: 5}
+            end:          {type: string, maxLength: 5}
+            note:         {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [entry, day_total]
+          properties:
+            entry:     {type: object}
+            day_total: {type: number}
+
+      - id: from_events
+        name: Log Meetings
+        description: >
+          Turn calendar meetings (the rows a calendar agent lists) into
+          entries, each rounded to the quarter hour on the day it took
+          place. The user's rules place each one; assign (an event_id
+          and project_code for each) places the rest. Returns what was logged, what
+          could not be placed and why, and what was skipped — already
+          logged, all-day, cancelled or declined, or in a submitted week.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          data: {entry: [list, create], project: [list], rule: [list], week: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [events]
+          properties:
+            events:
+              type: array
+              minItems: 1
+              maxItems: 200
+              items:
+                type: object
+                required: [event_id]
+                properties:
+                  event_id:  {type: string, maxLength: 400}
+                  summary:   {type: string, maxLength: 300}
+                  title:     {type: string, maxLength: 300}
+                  start:     {type: string, maxLength: 40}
+                  end:       {type: string, maxLength: 40}
+                  all_day:   {type: boolean}
+                  status:    {type: string, maxLength: 40}
+                  response:  {type: string, maxLength: 40}
+                  attendees: {type: string, maxLength: 4000}
+                  location:  {type: string, maxLength: 300}
+            assign:
+              type: array
+              maxItems: 200
+              items:
+                type: object
+                additionalProperties: false
+                required: [event_id, project_code]
+                properties:
+                  event_id:     {type: string, maxLength: 400}
+                  project_code: {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [created, unassigned, skipped]
+          properties:
+            created:    {type: array, items: {type: object}}
+            unassigned: {type: array, items: {type: object}}
+            skipped:    {type: array, items: {type: object}}
+
+      - id: list
+        name: List Entries
+        description: Entries in a week (this week by default) or between two dates, optionally for one project, with their total.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          data: {entry: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            week:         {type: string, maxLength: 8}
+            from_date:    {type: string, maxLength: 10}
+            to_date:      {type: string, maxLength: 10}
+            project_code: {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [entries, total]
+          properties:
+            entries: {type: array, items: {type: object}}
+            total:   {type: number}
+
+      - id: update
+        name: Update Entry
+        description: Change an entry's hours, project, date or note, in a week not submitted.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {entry: [read, list, update], project: [list], week: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [entry_ref]
+          properties:
+            entry_ref:    {type: string, x-resource: {type: data, id: entry}}
+            date:         {type: string, maxLength: 10}
+            project_code: {type: string, maxLength: 20}
+            hours:        {type: number, minimum: 0, maximum: 24}
+            note:         {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [entry]
+          properties:
+            entry: {type: object}
+
+      - id: remove
+        name: Remove Entry
+        description: Take an entry off a week not submitted.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {entry: [read, delete], week: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [entry_ref]
+          properties:
+            entry_ref: {type: string, x-resource: {type: data, id: entry}}
+        outputs:
+          type: object
+          required: [removed]
+          properties:
+            removed:   {type: boolean}
+            entry_ref: {type: string}
+
+  - id: weeks
+    name: Weeks
+    description: A week at a glance, handed in, and as a workbook.
+    resources:
+      data:  [entry, project, week]
+      files: [workbook]
+    functions:
+      - id: summary
+        name: Week Summary
+        description: >
+          A week (this week by default) by project and day, with totals,
+          billable hours, and the gaps — weekdays up to as_of (today by
+          default) with fewer than daily_hours (8 by default).
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          data: {entry: [list], project: [list], week: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            week:        {type: string, maxLength: 8}
+            as_of:       {type: string, maxLength: 10}
+            daily_hours: {type: number, minimum: 1, maximum: 24, default: 8}
+        outputs:
+          type: object
+          required: [week, status, projects, day_totals, total, gaps]
+          properties:
+            week:           {type: string}
+            from:           {type: string}
+            to:             {type: string}
+            status:         {type: string}
+            dates:          {type: array, items: {type: string}}
+            projects:       {type: array, items: {type: object}}
+            day_totals:     {type: array, items: {type: number}}
+            total:          {type: number}
+            billable_hours: {type: number}
+            gaps:           {type: array, items: {type: object}}
+            entries:        {type: integer}
+
+      - id: submit
+        name: Submit Week
+        description: >
+          Hand a week in: its entries are locked until it is reopened.
+          Returns its total and any gaps it was submitted with.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          data: {entry: [list, update], project: [list], week: [list, create, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            week:        {type: string, maxLength: 8}
+            as_of:       {type: string, maxLength: 10}
+            daily_hours: {type: number, minimum: 1, maximum: 24, default: 8}
+        outputs:
+          type: object
+          required: [week, status, total, entries]
+          properties:
+            week:    {type: string}
+            status:  {type: string}
+            total:   {type: number}
+            entries: {type: integer}
+            gaps:    {type: array, items: {type: object}}
+
+      - id: reopen
+        name: Reopen Week
+        description: Unlock a submitted week so its entries can change again.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          data: {entry: [list, update], week: [list, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            week: {type: string, maxLength: 8}
+        outputs:
+          type: object
+          required: [week, status]
+          properties:
+            week:   {type: string}
+            status: {type: string}
+
+      - id: workbook
+        name: Timesheet Workbook
+        description: >
+          The week as an Excel workbook — the project-by-day grid and
+          every entry — read back before it is returned.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          data:  {entry: [list], project: [list], week: [list]}
+          files: {workbook: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            week: {type: string, maxLength: 8}
+        outputs:
+          type: object
+          required: [file_ref, filename, total, verified]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: workbook}}
+            filename: {type: string}
+            total:    {type: number}
+            verified: {type: boolean}

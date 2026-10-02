@@ -1,0 +1,12 @@
+# Sample data: the order export the example prompts name — with the
+# faults they ask about (one order with no total and no city, one with
+# no lines at all) — and the schema to check it against.
+story: Sidra Office Supplies — an order export with gaps, and the schema it should meet.
+
+files:
+  - ref: orders
+    slot: source
+    path: samples/orders-export.json
+  - ref: schema
+    slot: source
+    path: samples/order-schema.json

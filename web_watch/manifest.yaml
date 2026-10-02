@@ -1,0 +1,291 @@
+# The Web Watch agent — watches public pages for the change that matters
+# and wakes the assistant only when there is one.
+#
+# A watch is a record holding the page's last reading. watches.changed
+# is schedulable: it fetches, compares, moves the reading forward and
+# returns only what changed in `changed`, the field a schedule wakes on.
+# A fetch failure is counted on the record and listed in `failed`, never
+# reported as a change. Only public internet addresses are fetched, on
+# every redirect hop too. No credential.
+
+schema_version: "1.0"
+
+agent:
+  id: web_watch
+  name: Web Watch
+  version: "0.1.3"
+  description: >
+    Watches public web pages and tells you when something you care
+    about changed: any change to the text, a phrase appearing or
+    disappearing, or a value such as a price or a status. Checked on
+    a schedule, it speaks up only when there is a change.
+  tags:
+    - web
+    - monitoring
+    - alerts
+    - productivity
+  examples:
+    - title: "Watch a price"
+      prompt: "Watch the price on https://shop.example.com/desk-lamp and tell me when it changes. Check every morning."
+    - title: "Wait for an announcement"
+      prompt: "Tell me when https://www.example.com/news mentions \"registration open\"."
+    - title: "What changed"
+      prompt: "Check my web watches now and show me what is different since last time."
+  instructions: >
+    Use this agent when the user wants to know when a public page
+    changes. Pick the kind that fits: "pattern" for a value such as a
+    price or a status word (a regular expression; its first group, or
+    the whole match, is the value), "contains" for a phrase appearing
+    or disappearing, and "page" only for any change to the text — pages
+    with rotating content (dates, counters, adverts) change on every
+    check, so prefer contains or pattern for those. watches.add takes a
+    first reading at once; show the user what was found. To check on a
+    cadence, schedule watches.changed with wake_field "changed"; it
+    returns only watches whose value changed, with before and after
+    (and a short line diff for page watches). "failed" lists pages
+    that could not be fetched and their consecutive failure count —
+    mention them, but a failure is not a change. watches.check_now
+    shows the current value against the stored one without moving
+    anything. Quote what the page says; never guess a value.
+
+implementation:
+  entrypoint: agent:WebWatchAgent
+  dependencies:
+    - requests>=2.31,<3
+    - pypdf>=4.2,<6
+
+# Where it connects: any website — that is its work. Addresses inside
+# the network it runs in are refused by the agent itself.
+network:
+  hosts: any
+
+resources:
+  data:
+    - id: watch
+      label: Web Watch
+      description: A public page being watched, what is watched for, and the last reading of it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: url,        label: URL,                 type: string, storage: keys, required: true}
+        - {name: final_url,  label: Final URL,           type: string, storage: keys, required: false}
+        - {name: kind,       label: Kind,                type: select, storage: keys, required: true, options: [page, contains, pattern]}
+        - {name: target,     label: Phrase Or Pattern,   type: string, storage: keys, required: false}
+        - {name: label,      label: Label,               type: string, storage: keys, required: false}
+        - {name: value,      label: Last Value,          type: string, storage: keys, required: false}
+        - {name: found,      label: Found (1 or 0),      type: number, storage: keys, required: false}
+        - {name: excerpt,    label: Excerpt,             type: string, storage: keys, required: false}
+        - {name: hash,       label: Text Hash,           type: string, storage: keys, required: false}
+        - {name: snapshot,   label: Text Snapshot,       type: string, storage: keys, required: false}
+        - {name: checked_at, label: Last Read,           type: string, storage: keys, required: false}
+        - {name: tried_at,   label: Last Tried,          type: string, storage: keys, required: false}
+        - {name: changed_at, label: Last Changed,        type: string, storage: keys, required: false}
+        - {name: failures,   label: Failures In A Row,   type: number, storage: keys, required: false}
+        - {name: last_error, label: Last Error,          type: string, storage: keys, required: false}
+
+tools:
+  - id: watches
+    name: Watches
+    description: Keeps watches on public pages and reports what changed.
+    resources:
+      data: [watch]
+    functions:
+      - id: add
+        name: Add Watch
+        description: >
+          Start watching a public page. kind "page" watches any change to
+          its readable text; "contains" watches phrase appearing or
+          disappearing; "pattern" watches the first match of a regular
+          expression (its first group if it has one) — for a price or a
+          status. Takes the first reading now and returns what it found.
+          An invalid regular expression is refused with why.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          data: {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url, kind]
+          properties:
+            url:     {type: string, minLength: 8, maxLength: 2000}
+            kind:    {type: string, enum: [page, contains, pattern]}
+            phrase:  {type: string, maxLength: 200}
+            pattern: {type: string, maxLength: 300}
+            label:   {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [watch_ref, url, final_url, kind, target, found, value, excerpt, checked_at]
+          properties:
+            watch_ref:  {type: string, x-resource: {type: data, id: watch}}
+            url:        {type: string}
+            final_url:  {type: string}
+            kind:       {type: string}
+            target:     {type: string}
+            found:      {type: boolean}
+            value:      {type: string}
+            excerpt:    {type: string}
+            checked_at: {type: string}
+            note:       {type: string}
+
+      - id: list
+        name: List Watches
+        description: >
+          The watches kept, least recently checked first (the first 25,
+          with the total): what each watches, its last value, when it
+          last changed, and consecutive fetch failures.
+        permission_level: 0
+        timeout_seconds: 20
+        resources:
+          data: {watch: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [watches, total]
+          properties:
+            total: {type: integer}
+            watches:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:  {type: string, x-resource: {type: data, id: watch}}
+                  label:      {type: string}
+                  url:        {type: string}
+                  kind:       {type: string}
+                  target:     {type: string}
+                  found:      {type: boolean}
+                  value:      {type: string}
+                  excerpt:    {type: string}
+                  checked_at: {type: string}
+                  changed_at: {type: string}
+                  failures:   {type: integer}
+                  last_error: {type: string}
+
+      - id: remove
+        name: Remove Watch
+        description: Stop watching a page and delete its watch.
+        permission_level: 1
+        timeout_seconds: 20
+        resources:
+          data: {watch: [read, delete]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [watch_ref]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+        outputs:
+          type: object
+          required: [removed, watch_ref, url]
+          properties:
+            removed:   {type: boolean}
+            watch_ref: {type: string}
+            url:       {type: string}
+
+      - id: check_now
+        name: Check Watch Now
+        description: >
+          Fetch one watched page now and show its current value against
+          the stored reading — changed, before and after, and a short
+          line diff for a page watch. Nothing is stored: the next
+          scheduled check still compares with the old reading.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          data: {watch: [read]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [watch_ref]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+        outputs:
+          type: object
+          required: [watch_ref, url, kind, changed, before, after, found_before, found_after, checked_at]
+          properties:
+            watch_ref:         {type: string, x-resource: {type: data, id: watch}}
+            label:             {type: string}
+            url:               {type: string}
+            final_url:         {type: string}
+            kind:              {type: string}
+            target:            {type: string}
+            changed:           {type: boolean}
+            before:            {type: string}
+            after:             {type: string}
+            found_before:      {type: boolean}
+            found_after:       {type: boolean}
+            before_value:      {type: string}
+            after_value:       {type: string}
+            excerpt_before:    {type: string}
+            excerpt_after:     {type: string}
+            before_checked_at: {type: string}
+            checked_at:        {type: string}
+            diff:              {type: array, items: {type: string}}
+            diff_truncated:    {type: boolean}
+            note:              {type: string}
+
+      - id: changed
+        name: Changed Pages
+        description: >
+          Fetch every watched page (or one, by watch_ref), compare with
+          the stored reading, and return only the watches that changed,
+          with before and after, a short line diff for page watches, and
+          the new reading stored. Pages that could not be fetched are
+          listed in "failed" with their consecutive failure count, and
+          are not changes. At most 25 pages a run, least recently checked
+          first; "more" says a later run continues. Schedule it with
+          wake_field "changed" to be woken only when something changed.
+        permission_level: 1
+        timeout_seconds: 300
+        schedulable: true
+        resources:
+          data: {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+        outputs:
+          type: object
+          required: [checked, changed, failed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            changed:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:         {type: string, x-resource: {type: data, id: watch}}
+                  label:             {type: string}
+                  url:               {type: string}
+                  final_url:         {type: string}
+                  kind:              {type: string}
+                  target:            {type: string}
+                  changed:           {type: boolean}
+                  before:            {type: string}
+                  after:             {type: string}
+                  found_before:      {type: boolean}
+                  found_after:       {type: boolean}
+                  before_value:      {type: string}
+                  after_value:       {type: string}
+                  excerpt_before:    {type: string}
+                  excerpt_after:     {type: string}
+                  before_checked_at: {type: string}
+                  checked_at:        {type: string}
+                  diff:              {type: array, items: {type: string}}
+                  diff_truncated:    {type: boolean}
+                  note:              {type: string}
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref: {type: string, x-resource: {type: data, id: watch}}
+                  label:     {type: string}
+                  url:       {type: string}
+                  error:     {type: string}
+                  failures:  {type: integer}

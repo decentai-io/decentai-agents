@@ -1,0 +1,375 @@
+# The JSON agent — reads the JSON and JSON Lines files people upload,
+# says what is actually inside them, answers questions by path, checks
+# them against a schema, compares two versions, and turns them into a
+# table a spreadsheet can open.
+#
+# Everything here is arithmetic over the parsed document: no model is
+# asked what a file contains, and nothing is inferred that the file does
+# not say. A file that does not parse is reported with the line and
+# column where it stopped, never half-read.
+
+schema_version: "1.0"
+
+agent:
+  id: json_data
+  name: JSON
+  version: "0.1.2"
+  description: >
+    Reads the JSON and JSON Lines files you upload: what is inside them,
+    which keys the records actually have and which are missing, the
+    values at a path, whether they match a schema, what changed between
+    two versions, and a CSV you can open in a spreadsheet.
+  tags:
+    - json
+    - data
+    - integration
+    - productivity
+  examples:
+    - title: "What is in this file"
+      prompt: "Inspect this JSON export: how many records, and which fields are missing from some of them?"
+    - title: "Check against a schema"
+      prompt: "Validate every record in this file against the attached schema and list what fails."
+    - title: "Make it a spreadsheet"
+      prompt: "Turn the orders in this JSON into a CSV with the customer, the total and the date."
+  instructions: >
+    Use this agent whenever the user attached a JSON, JSON Lines or CSV
+    file, or wants one produced. Start with read.inspect: it says whether
+    the file parses, how many records there are, and the key map — every
+    path the records actually use, how many records have it, and the
+    types seen. Trust the key map over any assumption about shape. Use
+    read.select with a path to pull values out; paths are a.b, a[0],
+    a[*] and *, and the root is $. check.validate needs a JSON Schema,
+    either inline or as an attached file; report the errors it returns
+    with their paths and do not describe a file as valid unless it says
+    so. compare.versions is deterministic — use it before saying what
+    changed between two files. shape.to_table writes a CSV and
+    shape.to_json writes a JSON file; both give you a file_ref to hand
+    to the user or to another agent. Never retype data from a file into
+    an answer from memory: read it.
+
+implementation:
+  entrypoint: agent:JsonDataAgent
+  dependencies:
+    - jsonschema>=4.21,<5
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: validation
+      label: Validation
+      description: A file checked against a schema, and what failed.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: file_ref, label: Source File, type: string,  storage: keys, required: true}
+        - {name: filename, label: Filename,    type: string,  storage: keys, required: false}
+        - {name: valid,    label: Valid,       type: select,  storage: keys, required: true, options: ["yes", "no"]}
+        - {name: checked,  label: Checked,     type: number,  storage: keys, required: true}
+        - {name: failures, label: Failures,    type: number,  storage: keys, required: true}
+        - {name: errors,   label: Errors,      type: object,  storage: values, required: false}
+
+    - id: output
+      label: Produced File
+      description: A file this agent produced, and what it was made from.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: kind,     label: Kind,        type: select, storage: keys, required: true, options: [csv, json]}
+        - {name: filename, label: Filename,    type: string, storage: keys, required: true}
+        - {name: file_ref, label: File,        type: string, storage: keys, required: true}
+        - {name: source,   label: Source File, type: string, storage: keys, required: false}
+        - {name: rows,     label: Rows,        type: number, storage: keys, required: false}
+
+  files:
+    - id: source
+      label: Source File
+      description: A JSON, JSON Lines or CSV file to read, or a schema to check against.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/json
+          - application/x-ndjson
+          - text/json
+          - text/plain
+          - text/csv
+        max_size_mb: 25  # the platform's upload limit
+    - id: result
+      label: Produced File
+      description: CSV and JSON files this agent produced.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/json
+          - text/csv
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: read
+    name: Read
+    description: Says what is inside a JSON file, and answers by path.
+    resources:
+      files: [source]
+    functions:
+      - id: inspect
+        name: Inspect File
+        description: >
+          What the file is and what is actually in it: JSON or JSON
+          Lines, the top-level type, how many records, how deep it
+          nests, and the key map — every path the records use, how many
+          records have it, the types seen at it, and one example value.
+          A file that does not parse is reported with the line and
+          column where parsing stopped.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: source}}
+            max_records: {type: integer, minimum: 1, maximum: 50000, default: 5000}
+        outputs:
+          type: object
+          required: [file_ref, filename, kind, valid, top_level, records, keys]
+          properties:
+            file_ref:  {type: string}
+            filename:  {type: string}
+            kind:      {type: string, enum: [json, jsonl, csv, unsupported]}
+            valid:     {type: boolean}
+            top_level: {type: string, enum: [object, array, string, number, boolean, "null", none]}
+            records:   {type: integer}
+            scanned:   {type: integer}
+            depth:     {type: integer}
+            bytes:     {type: integer}
+            keys:
+              type: array
+              items:
+                type: object
+                properties:
+                  path:    {type: string}
+                  present: {type: integer}
+                  types:   {type: array, items: {type: string}}
+                  example: {type: string}
+            keys_truncated: {type: boolean}
+            problem:        {type: string}
+            error_line:     {type: integer}
+            error_column:   {type: integer}
+
+      - id: select
+        name: Select By Path
+        description: >
+          The values at a path. A path is written a.b for nested keys,
+          a[0] for one item, a[*] for every item, * for every value of
+          an object, and $ for the whole document. Each match comes back
+          with the exact path it was found at. A value too large to
+          return whole is cut and marked truncated.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, path]
+          properties:
+            file_ref:         {type: string, x-resource: {type: file, id: source}}
+            path:             {type: string, minLength: 1, maxLength: 300}
+            max_results:      {type: integer, minimum: 1, maximum: 500, default: 50}
+            max_value_chars:  {type: integer, minimum: 100, maximum: 20000, default: 2000}
+        outputs:
+          type: object
+          required: [file_ref, path, matches, results]
+          properties:
+            file_ref:  {type: string}
+            path:      {type: string}
+            matches:   {type: integer}
+            truncated: {type: boolean}
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  path:      {type: string}
+                  type:      {type: string}
+                  value:     {}
+                  preview:   {type: string}
+                  truncated: {type: boolean}
+
+  - id: check
+    name: Check
+    description: Checks a file against a JSON Schema.
+    resources:
+      files: [source]
+      data:  [validation]
+    functions:
+      - id: validate
+        name: Validate Against Schema
+        description: >
+          The file checked against a JSON Schema, given inline as schema
+          or as an attached file as schema_ref. Every failure comes back
+          with the path in the document, the rule that failed and what
+          was wrong. With each_record, the records of an array or a JSON
+          Lines file are checked one by one and failures carry the
+          record's index. The result is recorded.
+        permission_level: 1
+        timeout_seconds: 120
+        resources:
+          files: {source: read}
+          data:  {validation: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: source}}
+            schema:      {type: object, additionalProperties: true}
+            schema_ref:  {type: string, x-resource: {type: file, id: source}}
+            each_record: {type: boolean, default: false}
+            max_errors:  {type: integer, minimum: 1, maximum: 500, default: 50}
+        outputs:
+          type: object
+          required: [validation_ref, file_ref, valid, checked, failures, errors]
+          properties:
+            validation_ref: {type: string, x-resource: {type: data, id: validation}}
+            file_ref:       {type: string}
+            valid:          {type: boolean}
+            checked:        {type: integer}
+            failures:       {type: integer}
+            truncated:      {type: boolean}
+            errors:
+              type: array
+              items:
+                type: object
+                properties:
+                  record:  {type: integer}
+                  path:    {type: string}
+                  rule:    {type: string}
+                  message: {type: string}
+
+  - id: compare
+    name: Compare
+    description: Compares two versions of a JSON file.
+    resources:
+      files: [source]
+    functions:
+      - id: versions
+        name: Compare Versions
+        description: >
+          What changed between two JSON files, path by path: values
+          added, removed and changed, with the value before and after.
+          Deterministic — nothing is judged, only compared. Arrays are
+          compared by position.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref_a, file_ref_b]
+          properties:
+            file_ref_a:  {type: string, x-resource: {type: file, id: source}}
+            file_ref_b:  {type: string, x-resource: {type: file, id: source}}
+            max_changes: {type: integer, minimum: 1, maximum: 500, default: 100}
+        outputs:
+          type: object
+          required: [identical, added, removed, changed, changes]
+          properties:
+            identical: {type: boolean}
+            added:     {type: integer}
+            removed:   {type: integer}
+            changed:   {type: integer}
+            truncated: {type: boolean}
+            changes:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind:   {type: string, enum: [added, removed, changed]}
+                  path:   {type: string}
+                  before: {type: string}
+                  after:  {type: string}
+
+  - id: shape
+    name: Shape
+    description: Turns JSON into a table, and a table into JSON.
+    resources:
+      files: [source, result]
+      data:  [output]
+    functions:
+      - id: to_table
+        name: JSON To CSV
+        description: >
+          A CSV file from the records of a JSON or JSON Lines file.
+          record_path picks what a record is (a.b[*]); left out, the
+          records are the items of a top-level array, the lines of a
+          JSON Lines file, or the single object. Nested values become
+          dotted columns (address.city); a list becomes its JSON text.
+          columns picks and orders them; left out, every column found is
+          kept in the order it first appears.
+        permission_level: 2
+        timeout_seconds: 120
+        resources:
+          files: {source: read, result: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, filename]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: source}}
+            filename:    {type: string, minLength: 1, maxLength: 120}
+            record_path: {type: string, maxLength: 300}
+            columns:     {type: array, maxItems: 100, items: {type: string, maxLength: 120}}
+            max_rows:    {type: integer, minimum: 1, maximum: 50000, default: 10000}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, rows, columns]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: result}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            rows:       {type: integer}
+            columns:    {type: array, items: {type: string}}
+            truncated:  {type: boolean}
+            skipped:    {type: integer}
+
+      - id: to_json
+        name: CSV To JSON
+        description: >
+          A JSON file from a CSV file: one object per row, keyed by the
+          header. With infer_types, numbers become numbers, true and
+          false become booleans and an empty cell becomes null — except
+          that anything with a leading zero or more than fifteen digits
+          stays text, because it is an identifier, not a number. With
+          expand_dots, a column named address.city becomes a nested
+          object, which is what shape.to_table flattened.
+        permission_level: 2
+        timeout_seconds: 120
+        resources:
+          files: {source: read, result: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref, filename]
+          properties:
+            file_ref:     {type: string, x-resource: {type: file, id: source}}
+            filename:     {type: string, minLength: 1, maxLength: 120}
+            infer_types:  {type: boolean, default: true}
+            expand_dots:  {type: boolean, default: true}
+            max_rows:     {type: integer, minimum: 1, maximum: 50000, default: 10000}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, records, columns]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: result}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            records:    {type: integer}
+            columns:    {type: array, items: {type: string}}
+            truncated:  {type: boolean}

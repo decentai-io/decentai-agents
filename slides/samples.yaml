@@ -1,0 +1,9 @@
+# Sample data: the deck the example prompts name — a quarterly review
+# with bullets, a table and speaker notes — as a platform file the agent
+# reads by file_ref.
+story: Sidra Office Supplies — a quarterly review deck to read, summarize or rebuild.
+
+files:
+  - ref: review
+    slot: source
+    path: samples/sidra-q3-review.pptx

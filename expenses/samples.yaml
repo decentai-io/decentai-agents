@@ -1,0 +1,98 @@
+# Sample data: a Dubai trip's receipts as text files, the travel policy
+# as rules, and a claim in draft with one duplicate and one line over the
+# meal allowance — what the example prompts ask about.
+story: Sidra Office Supplies — Sami's Dubai trip, four receipts, one policy.
+
+files:
+  - ref: policy
+    slot: policy_file
+    path: samples/travel-policy.md
+  - ref: hotel
+    slot: receipt_file
+    path: samples/receipt-hotel-2026-09-02.txt
+  - ref: dinner
+    slot: receipt_file
+    path: samples/receipt-dinner-2026-09-02.txt
+  - ref: taxi_a
+    slot: receipt_file
+    path: samples/receipt-taxi-2026-09-03.txt
+  - ref: taxi_b
+    slot: receipt_file
+    path: samples/receipt-taxi-2026-09-03-copy.txt
+
+records:
+  - slot: rule
+    fields: {name: meal_max_per_day, value: "150", quote: "Meals are reimbursed up to 150 USD per day.", source: "Travel policy, section 3"}
+  - slot: rule
+    fields: {name: hotel_max_per_night, value: "600", quote: "Hotels are reimbursed up to 600 USD per night.", source: "Travel policy, section 2"}
+  - slot: rule
+    fields: {name: receipt_required_above, value: "50", quote: "Any expense above 50 USD needs a receipt.", source: "Travel policy, section 1"}
+  - slot: rule
+    fields: {name: taxi_max_per_trip, value: "120", quote: "Taxis are reimbursed up to 120 USD per trip.", source: "Travel policy, section 4"}
+  - slot: rule
+    fields: {name: claim_within_days, value: "30", quote: "Claims are submitted within 30 days of the last receipt.", source: "Travel policy, section 1"}
+  - slot: rule
+    fields: {name: alcohol_allowed, value: "no", quote: "Alcohol is not reimbursed.", source: "Travel policy, section 3"}
+
+  - ref: dubai
+    slot: claim
+    fields:
+      title: Dubai trip, 2–3 September 2026
+      claimant: Sami
+      status: draft
+      currency: USD
+      note: Customer visit to Cedar Clinic's Dubai branch.
+
+  - ref: rc_hotel
+    slot: receipt
+    fields:
+      claim_ref: "@dubai"
+      file_ref: "@hotel"
+      filename: receipt-hotel-2026-09-02.txt
+      merchant: Creekside Suites
+      date: "2026-09-02"
+      currency: USD
+      amount: 540
+      category: accommodation
+      status: extracted
+      verified: "merchant, date, amount, currency"
+  - ref: rc_dinner
+    slot: receipt
+    fields:
+      claim_ref: "@dubai"
+      file_ref: "@dinner"
+      filename: receipt-dinner-2026-09-02.txt
+      merchant: Al Seef House Restaurant
+      date: "2026-09-02"
+      currency: USD
+      amount: 184
+      category: meals
+      status: needs_review
+      verified: "merchant, date, amount, currency"
+      note: Over the 150 USD daily meal allowance.
+  - ref: rc_taxi
+    slot: receipt
+    fields:
+      claim_ref: "@dubai"
+      file_ref: "@taxi_a"
+      filename: receipt-taxi-2026-09-03.txt
+      merchant: Careem
+      date: "2026-09-03"
+      currency: USD
+      amount: 38
+      category: transport
+      status: extracted
+      verified: "merchant, date, amount, currency"
+  - slot: receipt
+    fields:
+      claim_ref: "@dubai"
+      file_ref: "@taxi_b"
+      filename: receipt-taxi-2026-09-03-copy.txt
+      merchant: Careem
+      date: "2026-09-03"
+      currency: USD
+      amount: 38
+      category: transport
+      status: duplicate
+      duplicate_of: "@rc_taxi"
+      note: Same ride, same amount, same time — the receipt was uploaded twice.

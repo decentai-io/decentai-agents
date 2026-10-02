@@ -1,0 +1,11 @@
+sku,name,category,list_price,active
+DSK-140-OAK,Desk 140 oak,Desks,299,yes
+DSK-160-WAL,Desk 160 walnut,Desks,349,yes
+CHR-ARIA-BLK,Aria chair,Chairs,339,yes
+CHR-ERGO-GRY,Ergo chair,Chairs,319,yes
+CHR-P9-BASIC,Basic chair (4),Chairs,1190,yes
+PAP-A4-80,Copier paper box,Paper,45,yes
+TNR-HL-BLK,Toner black,Consumables,129,yes
+MON-ARM-DUAL,Dual monitor arm,Accessories,119,yes
+CAB-PED-3,Pedestal 3 drawers,Storage,159,yes
+WHB-120,Whiteboard 120 cm,Accessories,85,no

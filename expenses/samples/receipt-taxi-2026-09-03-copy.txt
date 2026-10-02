@@ -1,0 +1,10 @@
+CAREEM
+Trip receipt   03 Sep 2026 08:10 - 08:41
+From: Creekside Suites, Baniyas Road
+To: Cedar Clinic, Dubai Healthcare City
+Distance 14.2 km
+Fare                             38.00 USD
+Paid by card ending 4421
+Trip ID CR-9A21F
+
+(forwarded again from the phone on 4 Sep)

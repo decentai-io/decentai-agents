@@ -1,0 +1,904 @@
+# The Tasks agent — what you have to do, and everything that renews or
+# expires, kept in one list with the dates that matter.
+#
+# Two kinds of thing, one question: what must I do, and by when.
+#
+#   Tasks — obligations with an owner, a due date, a status and the
+#   evidence that closed them. Action items are EXTRACTED from notes as
+#   proposals, each with the passage that states it, and become tasks
+#   only when a person confirms them.
+#
+#   Renewals — anything that renews or expires: a subscription, a lease,
+#   an insurance policy, a warranty, a licence, a passport. Each keeps
+#   two dates apart — when it renews, and the earlier day by which
+#   notice must be given — and that deadline is arithmetic in code, in
+#   calendar or business days, never computed while a date or a basis
+#   is unknown. The model only reads a document; every quote it returns
+#   is checked verbatim against the text.
+#
+# "What is overdue" and "what is coming up" are both deterministic and
+# schedulable, so a clock can ask them every morning at no cost.
+
+schema_version: "1.0"
+
+agent:
+  id: tasks
+  name: Tasks
+  version: "0.2.3"
+  description: >
+    Everything you have to do, and everything that renews or expires,
+    in one list. Paste meeting notes and get the action items to
+    confirm; record a subscription, a lease or a passport and be told
+    before the day you must act — the notice deadline, not the renewal
+    date. Ask what is overdue, what is coming up, and what was done.
+  tags:
+    - tasks
+    - to-do
+    - deadlines
+    - renewals
+    - productivity
+  examples:
+    - title: "What needs me"
+      prompt: "What is overdue, and what is due in the next week?"
+    - title: "Before it renews"
+      prompt: "Our office lease renews on 1 March 2027 with 90 days' notice. Record it and tell me the last day I can give notice."
+    - title: "From notes to tasks"
+      prompt: "Here are my meeting notes; pull out what I said I would do, with dates, and let me confirm them."
+  instructions: >
+    Use this agent for anything someone has to do by a date, and for
+    anything that renews or expires. Tasks: record one with
+    tasks.create, never inventing an owner or a date; mark it done only
+    with what shows it was done (a message id, a file, a reference) in
+    evidence. From meeting notes, pass the text to extract.propose with
+    the meeting date; show the proposals — each quotes the passage it
+    came from and is marked commitment or suggestion — and confirm only
+    what the user agrees to (extract.confirm). Renewals: from a
+    document, pass its text (the Documents agent's text) to
+    agreements.extract, which proposes the dates and terms with each
+    clause quoted and checked, and names what is ambiguous or missing;
+    ask the user for every exact date or basis the text does not give,
+    and never guess one. Then agreements.create records it and derives
+    two deadlines: the renewal date, and the notice deadline (the
+    renewal date minus the notice period, in calendar or business
+    days). A reminder, a completed deadline or a recorded decision is
+    not a cancellation or a renewal: agreements.set_status changes the
+    state only with the confirmation's reference. For "what needs me",
+    use tasks.overdue (schedule it with wake_field "overdue") and
+    deadlines.upcoming (wake_field "due"); both are deterministic and
+    wake the assistant only while something is late or due. A reading
+    of a document is not legal advice; say so when it matters.
+
+implementation:
+  entrypoint: agent:TasksAgent
+  dependencies: []
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: task
+      label: Task
+      description: One obligation — who, what, by when, where it stands, and what proved it done.
+      binding: {cardinality: many, required: false}
+      user_access: [update]
+      fields:
+        - {name: title,    label: Title,    type: string, storage: keys, required: true}
+        - {name: owner,    label: Owner,    type: string, storage: keys, required: false}
+        - {name: due,      label: Due,      type: string, storage: keys, required: false}
+        - {name: status,   label: Status,   type: select, storage: keys, required: true, options: [open, done, blocked, cancelled]}
+        - {name: source,   label: Source,   type: string, storage: keys, required: false}
+        - {name: blocker,  label: Blocker,  type: string, storage: keys, required: false}
+        - {name: evidence, label: Evidence, type: string, storage: keys, required: false}
+        - {name: done_on,  label: Done On,  type: string, storage: keys, required: false}
+        - {name: note,     label: Note,     type: string, storage: keys, required: false}
+
+    - id: extraction
+      label: Proposed Action
+      description: An action item read out of notes, not yet confirmed by a person.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: title,    label: Title,    type: string, storage: keys, required: true}
+        - {name: kind,     label: Kind,     type: select, storage: keys, required: true, options: [commitment, suggestion]}
+        - {name: owner,    label: Owner,    type: string, storage: keys, required: false}
+        - {name: due,      label: Due,      type: string, storage: keys, required: false}
+        - {name: due_text, label: Due As Written, type: string, storage: keys, required: false}
+        - {name: quote,    label: Quote,    type: string, storage: keys, required: true}
+        - {name: source,   label: Source,   type: string, storage: keys, required: false}
+        - {name: status,   label: Status,   type: select, storage: keys, required: true, options: [proposed, confirmed, rejected]}
+        - {name: task_ref, label: Task,     type: string, storage: keys, required: false}
+
+    - id: agreement
+      label: Renewal
+      description: Anything that renews or expires — a subscription, contract, insurance policy, warranty, lease, licence or passport — and where it stands.
+      binding: {cardinality: many, required: false}
+      user_access: [update]
+      fields:
+        - {name: name,            label: Name,            type: string, storage: keys, required: true}
+        - {name: counterparty,    label: Counterparty,    type: string, storage: keys, required: true}
+        - {name: kind,            label: Kind,            type: select, storage: keys, required: true, options: [subscription, agreement, insurance, warranty, maintenance, lease, licence, identity, other]}
+        - {name: owner,           label: Responsible,     type: string, storage: keys, required: false}
+        - {name: reference,       label: Reference,       type: string, storage: keys, required: false}
+        - {name: start_date,      label: Start Date,      type: string, storage: keys, required: false}
+        - {name: renewal_date,    label: Renewal Date,    type: string, storage: keys, required: false}
+        - {name: notice_days,     label: Notice Days,     type: number, storage: keys, required: false}
+        - {name: notice_basis,    label: Notice Basis,    type: select, storage: keys, required: true, options: [calendar, business, unknown]}
+        - {name: notice_deadline, label: Notice Deadline, type: string, storage: keys, required: false}
+        - {name: auto_renews,     label: Auto-renews,     type: select, storage: keys, required: true, options: ["yes", "no", unknown]}
+        - {name: value,           label: Value,           type: number, storage: keys, required: false}
+        - {name: currency,        label: Currency,        type: string, storage: keys, required: false}
+        - {name: status,          label: Status,          type: select, storage: keys, required: true, options: [active, renewed, cancelled, expired]}
+        - {name: decision,        label: Decision,        type: select, storage: keys, required: true, options: [undecided, renew, cancel, renegotiate]}
+        - {name: decision_by,     label: Decided By,      type: string, storage: keys, required: false}
+        - {name: evidence,        label: Status Evidence, type: string, storage: keys, required: false}
+        - {name: note,            label: Note,            type: string, storage: keys, required: false}
+
+    - id: clause
+      label: Source Clause
+      description: The exact passage a date or term was read from, and how it was read.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: agreement_ref, label: Agreement, type: string, storage: keys, required: true}
+        - {name: topic,         label: Topic,     type: select, storage: keys, required: true, options: [renewal, notice, term, price, auto_renewal, other]}
+        - {name: quote,         label: Quote,     type: string, storage: keys, required: true}
+        - {name: reference,     label: Reference, type: string, storage: keys, required: false}
+        - {name: reading,       label: Reading,   type: string, storage: keys, required: false}
+        - {name: ambiguous,     label: Ambiguous, type: select, storage: keys, required: true, options: ["yes", "no"]}
+        - {name: verified,      label: Verified,  type: select, storage: keys, required: true, options: ["yes", "no"]}
+
+    - id: deadline
+      label: Deadline
+      description: One dated obligation on an agreement (notice, renewal, expiry, warranty end, review).
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: agreement_ref, label: Agreement, type: string, storage: keys, required: true}
+        - {name: kind,          label: Kind,      type: select, storage: keys, required: true, options: [notice, renewal, expiry, warranty_end, review, custom]}
+        - {name: title,         label: Title,     type: string, storage: keys, required: true}
+        - {name: date,          label: Date,      type: string, storage: keys, required: true}
+        - {name: basis,         label: Basis,     type: select, storage: keys, required: true, options: [calendar, business]}
+        - {name: owner,         label: Owner,     type: string, storage: keys, required: false}
+        - {name: status,        label: Status,    type: select, storage: keys, required: true, options: [open, done, cancelled]}
+        - {name: done_on,       label: Done On,   type: string, storage: keys, required: false}
+        - {name: evidence,      label: Evidence,  type: string, storage: keys, required: false}
+
+    - id: decision
+      label: Decision
+      description: What was decided about an agreement, by whom and when.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: agreement_ref, label: Agreement,  type: string, storage: keys, required: true}
+        - {name: decision,      label: Decision,   type: select, storage: keys, required: true, options: [renew, cancel, renegotiate]}
+        - {name: by,            label: Decided By, type: string, storage: keys, required: true}
+        - {name: decided_on,    label: Decided On, type: string, storage: keys, required: true}
+        - {name: note,          label: Note,       type: string, storage: keys, required: false}
+
+tools:
+  - id: tasks
+    name: Tasks
+    description: Keeps and queries tasks.
+    resources:
+      data: [task]
+    functions:
+      - id: create
+        name: Create Task
+        description: >
+          Record a task. owner and due (YYYY-MM-DD) only as given —
+          never guessed; a task without an owner is unassigned. source
+          names where it came from (a note ref, a thread id, a file).
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {task: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [title]
+          properties:
+            title:  {type: string, minLength: 1, maxLength: 200}
+            owner:  {type: string, maxLength: 120}
+            due:    {type: string, maxLength: 10}
+            source: {type: string, maxLength: 200}
+            note:   {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [task_ref, title, status, unassigned]
+          properties:
+            task_ref:   {type: string, x-resource: {type: data, id: task}}
+            title:      {type: string}
+            owner:      {type: string}
+            due:        {type: string}
+            status:     {type: string}
+            unassigned: {type: boolean}
+
+      - id: update
+        name: Update Task
+        description: >
+          Change a task: status (done needs evidence — what shows it was
+          done; blocked needs a blocker), owner, due, note.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {task: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [task_ref]
+          properties:
+            task_ref: {type: string, x-resource: {type: data, id: task}}
+            status:   {type: string, enum: [open, done, blocked, cancelled]}
+            owner:    {type: string, maxLength: 120}
+            due:      {type: string, maxLength: 10}
+            blocker:  {type: string, maxLength: 300}
+            evidence: {type: string, maxLength: 300}
+            done_on:  {type: string, maxLength: 10}
+            note:     {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [task_ref, status]
+          properties:
+            task_ref: {type: string, x-resource: {type: data, id: task}}
+            title:    {type: string}
+            owner:    {type: string}
+            due:      {type: string}
+            status:   {type: string}
+            blocker:  {type: string}
+            evidence: {type: string}
+
+      - id: list
+        name: List Tasks
+        description: Tasks, optionally by owner and status, due date first.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {task: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            owner:  {type: string, maxLength: 120}
+            status: {type: string, enum: [open, done, blocked, cancelled]}
+            source: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [tasks, total]
+          properties:
+            total: {type: integer}
+            tasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref: {type: string, x-resource: {type: data, id: task}}
+                  title:    {type: string}
+                  owner:    {type: string}
+                  due:      {type: string}
+                  status:   {type: string}
+                  blocker:  {type: string}
+                  source:   {type: string}
+
+      - id: overdue
+        name: Overdue And Upcoming
+        description: >
+          What is still outstanding as of a date (default today, in
+          timezone): overdue open tasks (past due), due_soon (within
+          within_days), blocked ones, and open tasks with no owner or
+          no date. Deterministic; schedule it with wake_field "overdue".
+        permission_level: 0
+        timeout_seconds: 15
+        schedulable: true
+        resources:
+          data: {task: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            as_of:       {type: string, maxLength: 10}
+            timezone:    {type: string, maxLength: 60}
+            within_days: {type: integer, minimum: 0, maximum: 60, default: 5}
+            owner:       {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [as_of, overdue, due_soon, blocked, unassigned, undated]
+          properties:
+            as_of: {type: string}
+            overdue:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref:  {type: string, x-resource: {type: data, id: task}}
+                  title:     {type: string}
+                  owner:     {type: string}
+                  due:       {type: string}
+                  days_late: {type: integer}
+            due_soon:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref: {type: string, x-resource: {type: data, id: task}}
+                  title:    {type: string}
+                  owner:    {type: string}
+                  due:      {type: string}
+                  days_left: {type: integer}
+            blocked:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref: {type: string, x-resource: {type: data, id: task}}
+                  title:    {type: string}
+                  owner:    {type: string}
+                  blocker:  {type: string}
+            unassigned:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref: {type: string, x-resource: {type: data, id: task}}
+                  title:    {type: string}
+                  due:      {type: string}
+            undated:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref: {type: string, x-resource: {type: data, id: task}}
+                  title:    {type: string}
+                  owner:    {type: string}
+
+  - id: extract
+    name: Extract
+    description: Reads proposed action items out of notes, and confirms or rejects them.
+    resources:
+      data: [extraction, task]
+    functions:
+      - id: propose
+        name: Propose Actions From Notes
+        description: >
+          Action items read out of notes with the chat's model, each with
+          the passage that states it (checked verbatim against the
+          notes), marked commitment or suggestion, with an owner only
+          when the notes name one and a date only when the notes give
+          one (weekday names resolve from meeting_date, YYYY-MM-DD).
+          Recorded as proposals; nothing is a task until confirmed.
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data: {extraction: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [notes]
+          properties:
+            notes:        {type: string, minLength: 10, maxLength: 40000}
+            source:       {type: string, maxLength: 200}
+            meeting_date: {type: string, maxLength: 10}
+            people:       {type: array, maxItems: 30, items: {type: string, maxLength: 120}}
+        outputs:
+          type: object
+          required: [proposals, commitments, suggestions, unassigned]
+          properties:
+            commitments: {type: integer}
+            suggestions: {type: integer}
+            unassigned:  {type: integer}
+            proposals:
+              type: array
+              items:
+                type: object
+                properties:
+                  extraction_ref: {type: string, x-resource: {type: data, id: extraction}}
+                  title:          {type: string}
+                  kind:           {type: string}
+                  owner:          {type: string}
+                  due:            {type: string}
+                  due_text:       {type: string}
+                  quote:          {type: string}
+                  verified:       {type: boolean}
+
+      - id: confirm
+        name: Confirm Proposals
+        description: >
+          Turn proposals the user agreed to into tasks. Each item names
+          an extraction_ref and may supply the owner or due the notes
+          lacked. Returns the tasks made and which are still unassigned.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {extraction: [read, update], task: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [items]
+          properties:
+            items:
+              type: array
+              minItems: 1
+              maxItems: 50
+              items:
+                type: object
+                additionalProperties: false
+                required: [extraction_ref]
+                properties:
+                  extraction_ref: {type: string, x-resource: {type: data, id: extraction}}
+                  owner:          {type: string, maxLength: 120}
+                  due:            {type: string, maxLength: 10}
+        outputs:
+          type: object
+          required: [tasks, unassigned, skipped]
+          properties:
+            tasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_ref:       {type: string, x-resource: {type: data, id: task}}
+                  extraction_ref: {type: string, x-resource: {type: data, id: extraction}}
+                  title:          {type: string}
+                  owner:          {type: string}
+                  due:            {type: string}
+            unassigned: {type: array, items: {type: string}}
+            skipped:
+              type: array
+              items:
+                type: object
+                properties:
+                  extraction_ref: {type: string}
+                  reason:         {type: string}
+
+      - id: reject
+        name: Reject Proposal
+        description: Mark a proposal as not wanted; nothing is created.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {extraction: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [extraction_ref]
+          properties:
+            extraction_ref: {type: string, x-resource: {type: data, id: extraction}}
+        outputs:
+          type: object
+          required: [rejected]
+          properties:
+            rejected: {type: boolean}
+
+  - id: agreements
+    name: Renewals
+    description: Things that renew or expire, the clauses they were read from, and their state.
+    resources:
+      data: [agreement, clause, deadline, decision]
+    functions:
+      - id: extract
+        name: Extract Dates And Terms
+        description: >
+          Reads an agreement's text and proposes counterparty, kind,
+          start date, renewal date, term, notice period and basis, and
+          whether it auto-renews, each with the clause quoted verbatim
+          and checked against the text (verified). Names what is
+          ambiguous (a notice period without calendar or business days)
+          and what is missing (a month without a day) as asks for the
+          user. Records nothing. A reading of the text, not legal advice.
+        permission_level: 0
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data: {}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [text]
+          properties:
+            text:      {type: string, minLength: 20, maxLength: 60000}
+            reference: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [proposal, clauses, ambiguities, asks, disclaimer]
+          properties:
+            proposal:
+              type: object
+              properties:
+                counterparty:    {type: string}
+                kind:            {type: string}
+                start_date:      {type: string}
+                start_text:      {type: string}
+                renewal_date:    {type: string}
+                renewal_text:    {type: string}
+                term_text:       {type: string}
+                notice_days:     {type: integer}
+                notice_basis:    {type: string}
+                notice_text:     {type: string}
+                auto_renews:     {type: string}
+                notice_deadline: {type: string}
+            clauses:
+              type: array
+              items:
+                type: object
+                properties:
+                  topic:     {type: string}
+                  quote:     {type: string}
+                  reading:   {type: string}
+                  verified:  {type: boolean}
+                  ambiguous: {type: boolean}
+            ambiguities: {type: array, items: {type: string}}
+            asks:        {type: array, items: {type: string}}
+            disclaimer:  {type: string}
+
+      - id: create
+        name: Create Agreement
+        description: >
+          Records an agreement with its clauses and derives two separate
+          deadlines: the renewal date, and the notice deadline = renewal
+          date minus notice_days on notice_basis (calendar days, or
+          business days Monday to Friday). Dates are YYYY-MM-DD. While
+          the renewal date, the notice period or the basis is missing or
+          unknown the notice deadline is not computed and the result
+          says what to ask for. auto_renews is "yes", "no" or unknown.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {agreement: [create], clause: [create], deadline: [list, create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name, counterparty, kind]
+          properties:
+            name:         {type: string, minLength: 1, maxLength: 200}
+            counterparty: {type: string, minLength: 1, maxLength: 200}
+            kind:         {type: string, enum: [subscription, agreement, insurance, warranty, maintenance, lease, licence, identity, other]}
+            owner:        {type: string, maxLength: 120}
+            reference:    {type: string, maxLength: 200}
+            start_date:   {type: string, maxLength: 10}
+            renewal_date: {type: string, maxLength: 10}
+            notice_days:  {type: integer, minimum: 0, maximum: 3650}
+            notice_basis: {type: string, enum: [calendar, business, unknown], default: unknown}
+            auto_renews:  {type: string, enum: ["yes", "no", unknown], default: unknown}
+            value:        {type: number, minimum: 0}
+            currency:     {type: string, minLength: 3, maxLength: 3, default: USD}
+            note:         {type: string, maxLength: 1000}
+            clauses:
+              type: array
+              maxItems: 20
+              items:
+                type: object
+                additionalProperties: false
+                required: [topic, quote]
+                properties:
+                  topic:     {type: string, enum: [renewal, notice, term, price, auto_renewal, other]}
+                  quote:     {type: string, minLength: 1, maxLength: 1000}
+                  reference: {type: string, maxLength: 200}
+                  reading:   {type: string, maxLength: 500}
+                  ambiguous: {type: boolean, default: false}
+                  verified:  {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [agreement_ref, name, status, deadlines, asks]
+          properties:
+            agreement_ref:   {type: string, x-resource: {type: data, id: agreement}}
+            name:            {type: string}
+            status:          {type: string}
+            renewal_date:    {type: string}
+            notice_deadline: {type: string}
+            notice_basis:    {type: string}
+            deadlines:
+              type: array
+              items:
+                type: object
+                properties:
+                  deadline_ref: {type: string, x-resource: {type: data, id: deadline}}
+                  kind:  {type: string}
+                  title: {type: string}
+                  date:  {type: string}
+                  basis: {type: string}
+            asks: {type: array, items: {type: string}}
+
+      - id: get
+        name: Get Agreement
+        description: The agreement with its clauses, deadlines and decisions.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {agreement: [read], clause: [list], deadline: [list], decision: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [agreement_ref]
+          properties:
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+        outputs:
+          type: object
+          required: [agreement_ref, name, status, decision, clauses, deadlines, decisions]
+          properties:
+            agreement_ref:   {type: string}
+            name:            {type: string}
+            counterparty:    {type: string}
+            kind:            {type: string}
+            owner:           {type: string}
+            reference:       {type: string}
+            start_date:      {type: string}
+            renewal_date:    {type: string}
+            notice_days:     {type: integer}
+            notice_basis:    {type: string}
+            notice_deadline: {type: string}
+            auto_renews:     {type: string}
+            value:           {type: number}
+            currency:        {type: string}
+            status:          {type: string}
+            decision:        {type: string}
+            decision_by:     {type: string}
+            evidence:        {type: string}
+            note:            {type: string}
+            clauses:
+              type: array
+              items:
+                type: object
+                properties:
+                  clause_ref: {type: string, x-resource: {type: data, id: clause}}
+                  topic:      {type: string}
+                  quote:      {type: string}
+                  reference:  {type: string}
+                  reading:    {type: string}
+                  ambiguous:  {type: string}
+                  verified:   {type: string}
+            deadlines:
+              type: array
+              items:
+                type: object
+                properties:
+                  deadline_ref: {type: string, x-resource: {type: data, id: deadline}}
+                  kind:     {type: string}
+                  title:    {type: string}
+                  date:     {type: string}
+                  basis:    {type: string}
+                  status:   {type: string}
+                  done_on:  {type: string}
+                  evidence: {type: string}
+            decisions:
+              type: array
+              items:
+                type: object
+                properties:
+                  decision_ref: {type: string, x-resource: {type: data, id: decision}}
+                  decision:   {type: string}
+                  by:         {type: string}
+                  decided_on: {type: string}
+                  note:       {type: string}
+
+      - id: update
+        name: Update Agreement
+        description: >
+          Changes the dates, notice period or basis, owner, auto-renewal,
+          value or note of an active agreement and recomputes the notice
+          deadline; open renewal and notice deadlines move with it.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {agreement: [read, update], deadline: [list, create, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [agreement_ref]
+          properties:
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+            owner:        {type: string, maxLength: 120}
+            start_date:   {type: string, maxLength: 10}
+            renewal_date: {type: string, maxLength: 10}
+            notice_days:  {type: integer, minimum: 0, maximum: 3650}
+            notice_basis: {type: string, enum: [calendar, business, unknown]}
+            auto_renews:  {type: string, enum: ["yes", "no", unknown]}
+            value:        {type: number, minimum: 0}
+            note:         {type: string, maxLength: 1000}
+        outputs:
+          type: object
+          required: [agreement_ref, status, asks]
+          properties:
+            agreement_ref:   {type: string, x-resource: {type: data, id: agreement}}
+            status:          {type: string}
+            renewal_date:    {type: string}
+            notice_deadline: {type: string}
+            notice_basis:    {type: string}
+            asks: {type: array, items: {type: string}}
+
+      - id: set_status
+        name: Set Agreement Status
+        description: >
+          Marks an agreement renewed, cancelled or expired. Renewed and
+          cancelled need the confirmation's reference as evidence (the
+          supplier's confirmation, the message id) and who confirmed it;
+          a reminder, a completed notice deadline or a recorded decision
+          is not a cancellation. Renewed needs the new renewal date and
+          derives the next notice deadline; cancelled and expired close
+          the open deadlines.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {agreement: [read, update], deadline: [list, create, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [agreement_ref, status]
+          properties:
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+            status:        {type: string, enum: [renewed, cancelled, expired]}
+            by:            {type: string, maxLength: 120}
+            evidence:      {type: string, maxLength: 300}
+            renewal_date:  {type: string, maxLength: 10}
+        outputs:
+          type: object
+          required: [agreement_ref, status]
+          properties:
+            agreement_ref:    {type: string, x-resource: {type: data, id: agreement}}
+            status:           {type: string}
+            renewal_date:     {type: string}
+            notice_deadline:  {type: string}
+            deadlines_closed: {type: integer}
+
+  - id: deadlines
+    name: Deadlines
+    description: What is due, what has passed, and what was done.
+    resources:
+      data: [agreement, deadline]
+    functions:
+      - id: upcoming
+        name: Upcoming Deadlines
+        description: >
+          Deterministic. As of a date (default today), "due" lists open
+          deadlines dated within within_days or already passed, with
+          calendar and business days left (negative when passed);
+          "awaiting_decision" lists active agreements whose notice
+          deadline is in that window with no decision recorded;
+          "incomplete" lists active agreements whose notice deadline
+          could not be computed and why. Schedule it with wake_field
+          "due" to be woken only while something is due or passed.
+        permission_level: 0
+        timeout_seconds: 15
+        schedulable: true
+        resources:
+          data: {agreement: [list], deadline: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            as_of:       {type: string, maxLength: 10}
+            within_days: {type: integer, minimum: 0, maximum: 365, default: 30}
+            owner:       {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [as_of, due, awaiting_decision, incomplete]
+          properties:
+            as_of: {type: string}
+            due:
+              type: array
+              items:
+                type: object
+                properties:
+                  deadline_ref:  {type: string, x-resource: {type: data, id: deadline}}
+                  agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+                  agreement:     {type: string}
+                  kind:          {type: string}
+                  title:         {type: string}
+                  date:          {type: string}
+                  basis:         {type: string}
+                  owner:         {type: string}
+                  days_left:     {type: integer}
+                  business_days_left: {type: integer}
+                  passed:        {type: boolean}
+                  decision:      {type: string}
+            awaiting_decision:
+              type: array
+              items:
+                type: object
+                properties:
+                  agreement_ref:   {type: string, x-resource: {type: data, id: agreement}}
+                  agreement:       {type: string}
+                  owner:           {type: string}
+                  notice_deadline: {type: string}
+                  renewal_date:    {type: string}
+                  days_left:       {type: integer}
+            incomplete:
+              type: array
+              items:
+                type: object
+                properties:
+                  agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+                  agreement:     {type: string}
+                  reason:        {type: string}
+
+      - id: add
+        name: Add Deadline
+        description: >
+          A further deadline on an agreement (a warranty end, an expiry,
+          a review date, or anything custom) with its date (YYYY-MM-DD)
+          and basis.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {agreement: [read], deadline: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [agreement_ref, kind, title, date]
+          properties:
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+            kind:  {type: string, enum: [expiry, warranty_end, review, custom]}
+            title: {type: string, minLength: 1, maxLength: 200}
+            date:  {type: string, maxLength: 10}
+            basis: {type: string, enum: [calendar, business], default: calendar}
+            owner: {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [deadline_ref, kind, title, date]
+          properties:
+            deadline_ref: {type: string, x-resource: {type: data, id: deadline}}
+            kind:  {type: string}
+            title: {type: string}
+            date:  {type: string}
+
+      - id: complete
+        name: Complete Deadline
+        description: >
+          Records that a deadline was acted on (notice given, review
+          held) with the evidence (the message id, the letter's
+          reference) and the date. Completing a notice deadline records
+          that notice was given; it does not cancel the agreement.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {deadline: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [deadline_ref, evidence]
+          properties:
+            deadline_ref: {type: string, x-resource: {type: data, id: deadline}}
+            evidence:     {type: string, minLength: 1, maxLength: 300}
+            done_on:      {type: string, maxLength: 10}
+        outputs:
+          type: object
+          required: [deadline_ref, status, done_on, note]
+          properties:
+            deadline_ref: {type: string, x-resource: {type: data, id: deadline}}
+            status:  {type: string}
+            done_on: {type: string}
+            note:    {type: string}
+
+  - id: decisions
+    name: Decisions
+    description: What was decided about an agreement.
+    resources:
+      data: [agreement, decision]
+    functions:
+      - id: record
+        name: Record Decision
+        description: >
+          Records the intended decision (renew, cancel or renegotiate)
+          with who took it and when. It is an intention: the agreement
+          stays active until agreements.set_status records the outcome
+          with its confirmation.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {agreement: [read, update], decision: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [agreement_ref, decision, by]
+          properties:
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+            decision:   {type: string, enum: [renew, cancel, renegotiate]}
+            by:         {type: string, minLength: 1, maxLength: 120}
+            decided_on: {type: string, maxLength: 10}
+            note:       {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [decision_ref, agreement_ref, decision, status]
+          properties:
+            decision_ref:  {type: string, x-resource: {type: data, id: decision}}
+            agreement_ref: {type: string, x-resource: {type: data, id: agreement}}
+            decision:      {type: string}
+            status:        {type: string}

@@ -1,0 +1,80 @@
+# A form: the steps of an application, in the order they are asked,
+# each with the checks its answer must pass. Kinds: text, number, date,
+# choice, email, file. A step is required unless `required: false`.
+#
+# A file step names the types it accepts, may cap `max_mb` and
+# `max_pages`, may say what to `read` from the document (the model reads
+# it — a PDF by its text, a photo by its pixels), and may hold what was
+# read to `checks`. The one check today: date_after — the read date must
+# be at least `months` after an earlier date step.
+id: travel_authorization
+title: Travel authorization
+description: >
+  Permission to travel for work: who, where, when, why, what it costs,
+  and a copy of the traveller's passport valid for the trip.
+steps:
+  - field: traveller
+    label: Who is travelling? The full name as written in the passport.
+    kind: text
+    min_length: 3
+    max_length: 120
+
+  - field: employee_id
+    label: The traveller's employee number.
+    kind: text
+    pattern: "^[A-Z]{2}-[0-9]{4,6}$"
+    pattern_hint: two capital letters, a dash, and four to six digits, like SO-12345
+
+  - field: destination
+    label: Where to? City and country.
+    kind: text
+    min_length: 3
+    max_length: 120
+
+  - field: departure
+    label: Departure date.
+    kind: date
+    not_before: today
+
+  - field: return_date
+    label: Return date.
+    kind: date
+    after: departure
+
+  - field: purpose
+    label: What is the trip for?
+    kind: choice
+    choices: [Client visit, Conference, Training, Other]
+
+  - field: estimated_cost
+    label: Estimated total cost, in USD.
+    kind: number
+    min: 0
+    max: 50000
+
+  - field: manager_email
+    label: The approving manager's email address.
+    kind: email
+
+  - field: passport
+    label: A copy of the traveller's passport.
+    kind: file
+    accept: [application/pdf, image/png, image/jpeg]
+    max_mb: 10
+    max_pages: 4
+    read:
+      passport_number: the passport number
+      expiry: the expiry date
+    checks:
+      - kind: date_after
+        read_field: expiry
+        after_field: return_date
+        months: 6
+        message: The passport must be valid for at least six months after the return date.
+
+  - field: itinerary
+    label: The itinerary or booking confirmation, if there is one yet.
+    kind: file
+    required: false
+    accept: [application/pdf]
+    max_mb: 10

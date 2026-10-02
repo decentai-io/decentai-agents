@@ -1,0 +1,548 @@
+# The Google Docs agent — one Google account's documents, read, commented
+# on and edited through the platform's gates, over the Docs API (v1) for
+# content and edits and the Drive API (v3) for finding documents and for
+# their comments, which Google keeps in Drive.
+#
+# A document is read as numbered paragraphs, a slice at a time. Comments
+# are read freely; adding, replying and resolving are seen by everyone
+# who can open the document, so each is level 3. Text changes in two
+# steps, the way the mail agents send: edits.propose records the change
+# and the document's revision (nothing moves), and edits.apply sends it
+# as a separate level-3 call that Google refuses if the document changed
+# since. A watch on a document lets a schedule wake the assistant only
+# when someone else has commented or replied.
+
+schema_version: "1.0"
+
+agent:
+  id: google_docs
+  name: Google Docs
+  version: "0.1.2"
+  description: >
+    Your Google Docs, through the assistant. Read a document by
+    paragraph, see and answer its comments, propose a change and apply
+    it on your go-ahead, and be told when someone comments.
+  tags:
+    - documents
+    - google
+    - collaboration
+    - productivity
+  examples:
+    - title: "Read a document"
+      prompt: "Open the Sidra supplier handbook in Google Docs and summarise the returns section."
+    - title: "Answer the comments"
+      prompt: "Show me the open comments on the Q3 proposal and draft a reply to each for me to check."
+    - title: "Propose, then apply"
+      prompt: "In the Q3 proposal, change the delivery paragraph to say ten working days, show me the change, and apply it when I say so."
+    - title: "Watch for comments"
+      prompt: "Watch the Q3 proposal and tell me whenever someone comments or replies."
+  instructions: >
+    Use this agent to read, comment on or edit Google Docs. Find a
+    document first (docs.find) and take its document_id from there; never
+    invent an id. docs.read returns numbered paragraphs a slice at a
+    time with the total; continue with next_from rather than guessing
+    what the rest says, and quote paragraphs with their numbers.
+    comments.add, comments.reply and comments.resolve are seen by
+    everyone who can open the document and may pause for approval: show
+    the person the exact words first. To change text, call
+    edits.propose with the paragraph number and the full new text of
+    that one paragraph, show the person the old and new text side by
+    side, and only on their go-ahead call edits.apply. An apply refused
+    because the document changed means read it again and propose again
+    — never retry the old edit. An apply that comes back "unknown" was
+    not confirmed by Google: say so and ask the person to look at the
+    document. To hear about new comments, record a watch once
+    (comments.watch) and schedule comments.new with wake_field
+    "comments"; each wake carries only what others wrote since the last
+    check.
+
+implementation:
+  entrypoint: agent:GoogleDocsAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - docs.googleapis.com
+    - www.googleapis.com
+
+resources:
+  secrets:
+    - id: google
+      label: Google Account
+      description: >
+        A Google account, connected by signing in — the same connection
+        the Gmail, Google Calendar and Google Drive agents use; grant one
+        saved account to each. The platform keeps and refreshes the
+        tokens; this agent receives a short-lived access token.
+        api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: google
+        authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+        token_url: https://oauth2.googleapis.com/token
+        scopes:
+          - openid
+          - https://www.googleapis.com/auth/userinfo.email
+          - https://www.googleapis.com/auth/gmail.modify
+          - https://www.googleapis.com/auth/calendar
+          - https://www.googleapis.com/auth/drive
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/forms.body.readonly
+          - https://www.googleapis.com/auth/forms.responses.readonly
+          - https://www.googleapis.com/auth/tasks
+        authorize_params: {access_type: offline, prompt: consent}
+        identity: {url: https://openidconnect.googleapis.com/v1/userinfo, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: edit
+      label: Proposed Edit
+      description: >
+        One paragraph's change: the text as it was read, the text to put
+        in its place, the document's revision when it was proposed, and
+        what became of it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: document_id,         label: Document ID,        type: string, storage: keys, required: true}
+        - {name: title,               label: Document,           type: string, storage: keys, required: true}
+        - {name: paragraph,           label: Paragraph,          type: number, storage: keys, required: true}
+        - {name: old_text,            label: Text As Read,       type: string, storage: keys, required: true}
+        - {name: new_text,            label: New Text,           type: string, storage: keys, required: true}
+        - {name: revision_id,         label: Revision Then,      type: string, storage: keys, required: true}
+        - {name: status,              label: Status,             type: select, storage: keys, required: true, options: [proposed, applied, refused, unknown, discarded]}
+        - {name: reason,              label: Why,                type: string, storage: keys, required: false}
+        - {name: applied_revision_id, label: Revision After,     type: string, storage: keys, required: false}
+        - {name: note,                label: Note,               type: string, storage: keys, required: false}
+
+    - id: watch
+      label: Comment Watch
+      description: >
+        How far a document's comments have been read on the user's
+        behalf: the creation time of the newest comment or reply seen
+        (Google's clock) and the ids created exactly then.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: document_id, label: Document ID,      type: string, storage: keys, required: true}
+        - {name: title,       label: Document,         type: string, storage: keys, required: true}
+        - {name: since,       label: Read Up To,       type: string, storage: keys, required: true}
+        - {name: cursor_ids,  label: Ids At That Time, type: string, storage: keys, required: false}
+        - {name: status,      label: Status,           type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,        label: Note,             type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Google account.
+    resources:
+      secrets: [google]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Google connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: docs
+    name: Documents
+    description: Finds Google Docs and reads one as numbered paragraphs.
+    resources:
+      secrets: [google]
+    functions:
+      - id: find
+        name: Find Documents
+        description: >
+          Google Docs whose name or content matches query, newest change
+          first, with links.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query:       {type: string, minLength: 1, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+        outputs:
+          type: object
+          required: [documents]
+          properties:
+            documents:
+              type: array
+              items:
+                type: object
+                properties:
+                  document_id: {type: string}
+                  title:       {type: string}
+                  modified:    {type: string}
+                  modified_by: {type: string}
+                  link:        {type: string}
+
+      - id: read
+        name: Read Document
+        description: >
+          A document's title, revision id and text as numbered paragraphs
+          (index from 1, style such as HEADING_1 or NORMAL_TEXT, text;
+          table cells included and marked in_table), from paragraph
+          "from", at most max_paragraphs and max_chars at a time, with
+          total_paragraphs. next_from continues.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id]
+          properties:
+            document_id:    {type: string, minLength: 1, maxLength: 200}
+            from:           {type: integer, minimum: 1, default: 1}
+            max_paragraphs: {type: integer, minimum: 1, maximum: 200, default: 50}
+            max_chars:      {type: integer, minimum: 500, maximum: 40000, default: 20000}
+        outputs:
+          type: object
+          required: [document_id, title, revision_id, total_paragraphs, from, paragraphs]
+          properties:
+            document_id:      {type: string}
+            title:            {type: string}
+            revision_id:      {type: string}
+            total_paragraphs: {type: integer}
+            from:             {type: integer}
+            next_from:        {type: integer}
+            link:             {type: string}
+            paragraphs:
+              type: array
+              items:
+                type: object
+                properties:
+                  index:     {type: integer}
+                  style:     {type: string}
+                  text:      {type: string}
+                  in_table:  {type: boolean}
+                  truncated: {type: boolean}
+
+  - id: comments
+    name: Comments
+    description: >
+      Reads a document's comments, adds, answers and resolves them on
+      authorization, and watches a document for new ones.
+    resources:
+      secrets: [google]
+      data:    [watch]
+    functions:
+      - id: list
+        name: List Comments
+        description: >
+          A document's comments, open and resolved (include_resolved
+          false leaves resolved ones out), each with the text it quotes,
+          its author and time, and the latest five replies of each in
+          "replies" (reply_count says how many there are). page_token
+          continues.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id]
+          properties:
+            document_id:      {type: string, minLength: 1, maxLength: 200}
+            include_resolved: {type: boolean, default: true}
+            max_results:      {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:       {type: string, maxLength: 2000}
+        outputs:
+          type: object
+          required: [comments, replies]
+          properties:
+            next_page_token: {type: string}
+            comments:
+              type: array
+              items:
+                type: object
+                properties:
+                  comment_id:  {type: string}
+                  author:      {type: string}
+                  created:     {type: string}
+                  modified:    {type: string}
+                  text:        {type: string}
+                  quoted:      {type: string}
+                  resolved:    {type: boolean}
+                  reply_count: {type: integer}
+            replies:
+              type: array
+              items:
+                type: object
+                properties:
+                  comment_id: {type: string}
+                  reply_id:   {type: string}
+                  author:     {type: string}
+                  created:    {type: string}
+                  text:       {type: string}
+                  action:     {type: string}
+
+      - id: add
+        name: Add Comment
+        description: >
+          Add a comment to a document, seen by everyone who can open it.
+          quote, when given, must be words copied exactly from the
+          document; it is shown with the comment as the passage it is
+          about, but a comment made this way is not pinned to a range in
+          the Docs editor. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id, text]
+          properties:
+            document_id: {type: string, minLength: 1, maxLength: 200}
+            text:        {type: string, minLength: 1, maxLength: 4000}
+            quote:       {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [comment_id, created]
+          properties:
+            comment_id: {type: string}
+            created:    {type: string}
+            quoted:     {type: string}
+            link:       {type: string}
+
+      - id: reply
+        name: Reply to Comment
+        description: Answer a comment (comment_id from comments.list), seen by everyone who can open the document. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id, comment_id, text]
+          properties:
+            document_id: {type: string, minLength: 1, maxLength: 200}
+            comment_id:  {type: string, minLength: 1, maxLength: 200}
+            text:        {type: string, minLength: 1, maxLength: 4000}
+        outputs:
+          type: object
+          required: [reply_id, created]
+          properties:
+            reply_id: {type: string}
+            created:  {type: string}
+
+      - id: resolve
+        name: Resolve Comment
+        description: Mark a comment resolved, with an optional closing reply. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id, comment_id]
+          properties:
+            document_id: {type: string, minLength: 1, maxLength: 200}
+            comment_id:  {type: string, minLength: 1, maxLength: 200}
+            text:        {type: string, maxLength: 4000}
+        outputs:
+          type: object
+          required: [resolved]
+          properties:
+            resolved: {type: boolean}
+            reply_id: {type: string}
+            note:     {type: string}
+
+      - id: watch
+        name: Watch for Comments
+        description: >
+          Start watching a document for new comments and replies, from
+          now. Record it once, then schedule comments.new.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id]
+          properties:
+            document_id: {type: string, minLength: 1, maxLength: 200}
+            note:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, title, since]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            title: {type: string}
+            since: {type: string}
+
+      - id: new
+        name: New Comments
+        description: >
+          Comments and replies written since the last check, for every
+          comment watch (or one, by watch_ref), oldest first, each naming
+          its watch and document. What the account wrote itself is not
+          reported. Moves the watch forward; "more" says a later check
+          continues. Schedule it with wake_field "comments" to be woken
+          only when someone wrote something.
+        permission_level: 1
+        timeout_seconds: 90
+        schedulable: true
+        resources:
+          secrets: {google: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, comments, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            comments:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+                  document_id: {type: string}
+                  title:       {type: string}
+                  kind:        {type: string}
+                  comment_id:  {type: string}
+                  reply_id:    {type: string}
+                  author:      {type: string}
+                  created:     {type: string}
+                  text:        {type: string}
+                  quoted:      {type: string}
+                  in_reply_to: {type: string}
+                  link:        {type: string}
+
+  - id: edits
+    name: Edits
+    description: >
+      Proposes a change to one paragraph as a record, and applies it to
+      the document only on authorization and only if the document has
+      not changed since.
+    resources:
+      secrets: [google]
+      data:    [edit]
+    functions:
+      - id: propose
+        name: Propose Edit
+        description: >
+          Record a change to one paragraph (its number from docs.read):
+          the text as it reads now, new_text to replace it (one
+          paragraph, no line breaks; its style is kept), and the
+          document's revision. Nothing in the document changes; show the
+          person old and new text before applying.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+          data:    {edit: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [document_id, paragraph, new_text]
+          properties:
+            document_id: {type: string, minLength: 1, maxLength: 200}
+            paragraph:   {type: integer, minimum: 1}
+            new_text:    {type: string, maxLength: 8000}
+            note:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [edit_ref, title, paragraph, old_text, new_text, revision_id]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+            title:       {type: string}
+            paragraph:   {type: integer}
+            old_text:    {type: string}
+            new_text:    {type: string}
+            revision_id: {type: string}
+            link:        {type: string}
+
+      - id: apply
+        name: Apply Edit
+        description: >
+          Put a proposed edit into the document, which everyone who can
+          open it will see. Google refuses it if the document changed
+          after the proposal; the edit is then marked refused and must be
+          proposed again from a fresh read. An unconfirmed outcome is
+          reported as unknown and never retried. Only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {edit: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [edit_ref]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+        outputs:
+          type: object
+          required: [applied, status]
+          properties:
+            applied:     {type: boolean}
+            status:      {type: string, enum: [applied]}
+            paragraph:   {type: integer}
+            revision_id: {type: string}
+            link:        {type: string}
+
+      - id: discard
+        name: Discard Edit
+        description: Mark a proposed edit discarded. The document is not touched.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {edit: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [edit_ref]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+        outputs:
+          type: object
+          required: [discarded]
+          properties:
+            discarded: {type: boolean}

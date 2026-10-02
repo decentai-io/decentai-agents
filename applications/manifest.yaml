@@ -1,0 +1,397 @@
+# The Applications agent — a guided application, one step at a time.
+#
+# A form is a file in this agent's folder: its steps in order, each a
+# typed question (text, number, date, choice, email) or a document to
+# attach, with the checks that answer must pass. The agent owns the
+# sequence: it says what comes next, checks each answer or document as
+# it arrives, keeps the whole application as records the person can
+# open without it, and submits only on the person's word. The assistant
+# phrases the questions; it never decides what to ask.
+#
+# A document is checked in code (type, size, pages) and, where the form
+# says what to read from it, read by the chat's model — a PDF by its
+# text, a photo by its pixels — and held to the form's rules. What the
+# model read is marked verified when the text carries it, and assumed
+# when it does not.
+
+schema_version: "1.0"
+
+agent:
+  id: applications
+  name: Applications
+  version: "0.1.2"
+  description: >
+    A guided application: the questions asked one at a time, each answer
+    and document checked as it arrives, the whole kept until it is
+    submitted on your word. Forms are files this agent carries.
+  tags:
+    - forms
+    - intake
+    - requests
+    - productivity
+  examples:
+    - title: "Start an application"
+      prompt: "I need to submit a travel authorization for a client visit to Riyadh next month."
+    - title: "Continue where I left off"
+      prompt: "Continue my travel authorization — what is still missing?"
+    - title: "Request equipment"
+      prompt: "Request a laptop for the new hire starting in October."
+  instructions: >
+    Use this agent when the user wants to submit, continue or check an
+    application on one of the forms it carries (forms.list). Start one
+    with applications.start, then drive it with applications.step,
+    which asks the person the next question itself — as a card with
+    choices, or an attach button for a document — checks the answer,
+    records it, and reports what came of it; call it again until it
+    says done. If the person already gave an answer in the chat, record
+    it with applications.answer (or a file with applications.attach)
+    instead of asking again. Never invent an answer, a date or a
+    document; a problem the agent reports is for the person to fix.
+    applications.review shows the whole application and what is still
+    missing; applications.submit is the person's own final step and may
+    pause for approval — never call it before review says ready.
+
+implementation:
+  entrypoint: agent:ApplicationsAgent
+  dependencies:
+    - pypdf>=4.2,<6
+    - PyYAML>=6,<7
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: application
+      label: Application
+      description: >
+        One application on one form: where it stands, and the reference
+        it received when submitted. Its answers and documents are
+        records of their own.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: form,         label: Form,         type: string, storage: keys, required: true}
+        - {name: title,        label: Title,        type: string, storage: keys, required: true}
+        - {name: status,       label: Status,       type: select, storage: keys, required: true, options: [draft, submitted, withdrawn]}
+        - {name: progress,     label: Progress,     type: string, storage: keys, required: false}
+        - {name: reference,    label: Reference,    type: string, storage: keys, required: false}
+        - {name: submitted_at, label: Submitted At, type: string, storage: keys, required: false}
+
+    - id: answer
+      label: Answer
+      description: One answer on one application — the step it answers and the value as checked.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: application, label: Application, type: string, storage: keys, required: true}
+        - {name: field,       label: Step,        type: string, storage: keys, required: true}
+        - {name: label,       label: Question,    type: string, storage: keys, required: true}
+        - {name: value,       label: Answer,      type: string, storage: keys, required: false}
+        - {name: skipped,     label: Skipped,     type: select, storage: keys, required: true, options: ["no", "yes"]}
+
+    - id: attachment
+      label: Attached Document
+      description: >
+        One document on one application — the step it answers, the file,
+        what was checked, and what the model read from it (verified,
+        assumed or missing, field by field).
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: application, label: Application, type: string, storage: keys, required: true}
+        - {name: field,       label: Step,        type: string, storage: keys, required: true}
+        - {name: label,       label: Question,    type: string, storage: keys, required: true}
+        - {name: file_ref,    label: File,        type: string, storage: keys, required: true}
+        - {name: filename,    label: Filename,    type: string, storage: keys, required: true}
+        - {name: type,        label: Type,        type: string, storage: keys, required: true}
+        - {name: size,        label: Size,        type: number, storage: keys, required: true}
+        - {name: pages,       label: Pages,       type: number, storage: keys, required: false}
+        - {name: read,        label: Read,        type: string, storage: keys, required: false}
+
+  files:
+    - id: document
+      label: Attached Document
+      description: A document the person attached to an application — a scan, a photo, a PDF.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - image/png
+          - image/jpeg
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: forms
+    name: Forms
+    description: The forms this agent carries.
+    functions:
+      - id: list
+        name: List Forms
+        description: >
+          The forms available: id, title, what each is for, and its
+          steps in order with their kinds.
+        permission_level: 0
+        timeout_seconds: 15
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [forms]
+          properties:
+            forms:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:          {type: string}
+                  title:       {type: string}
+                  description: {type: string}
+                  steps:
+                    type: array
+                    items: {type: object}   # field, label, kind, required
+
+  - id: applications
+    name: Applications
+    description: >
+      Applications on the forms: started, driven one step at a time,
+      reviewed, and submitted on the person's word.
+    resources:
+      data:  [application, answer, attachment]
+      files: [document]
+    functions:
+      - id: list
+        name: List Applications
+        description: The person's applications, with their form, status and progress.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {application: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            status: {type: string, enum: [draft, submitted, withdrawn]}
+        outputs:
+          type: object
+          required: [applications]
+          properties:
+            applications:
+              type: array
+              items:
+                type: object
+                properties:
+                  application_ref: {type: string, x-resource: {type: data, id: application}}
+                  form:            {type: string}
+                  title:           {type: string}
+                  status:          {type: string}
+                  progress:        {type: string}
+                  reference:       {type: string}
+
+      - id: start
+        name: Start An Application
+        description: >
+          Start an application on a form (by form id, from forms.list).
+          Returns the record and the first step to ask.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {application: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [form]
+          properties:
+            form: {type: string, maxLength: 60}
+        outputs:
+          type: object
+          required: [application_ref, title, next]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+            title:           {type: string}
+            next:            {type: object}
+
+      - id: next
+        name: Next Step
+        description: >
+          What to ask next: the first step without an answer — its field,
+          label, kind, choices and whether it is required — with how many
+          remain. done is true when nothing is left to ask.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {application: [read], answer: [list], attachment: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+        outputs:
+          type: object
+          required: [done, remaining]
+          properties:
+            done:      {type: boolean}
+            remaining: {type: integer}
+            step:      {type: object}
+
+      - id: answer
+        name: Record An Answer
+        description: >
+          Record the person's answer to one step, checked against the
+          form: a date must be YYYY-MM-DD and obey the form's date rules,
+          a number its bounds, a choice one of those offered. An empty
+          value skips an optional step. Refused answers come back with
+          their problems and nothing recorded.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {application: [read, update], answer: [list, create, update], attachment: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref, field]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+            field:           {type: string, maxLength: 60}
+            value:           {type: string, maxLength: 2000}
+        outputs:
+          type: object
+          required: [accepted, problems]
+          properties:
+            accepted: {type: boolean}
+            problems: {type: array, items: {type: string}}
+            value:    {type: string}
+            next:     {type: object}
+
+      - id: attach
+        name: Attach A Document
+        description: >
+          Attach a document to a document step: checked for type and size,
+          a PDF for its pages and text, and — where the form says what to
+          read from it — read by the model and held to the form's rules.
+          What was read comes back marked verified (found in the text) or
+          assumed (a reading the text could not confirm, or a photo).
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data:  {application: [read, update], answer: [list], attachment: [list, create, update]}
+          files: {document: [read]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref, field, file_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+            field:           {type: string, maxLength: 60}
+            file_ref:        {type: string, x-resource: {type: file, id: document}}
+        outputs:
+          type: object
+          required: [accepted, problems]
+          properties:
+            accepted: {type: boolean}
+            problems: {type: array, items: {type: string}}
+            document: {type: object}
+            next:     {type: object}
+
+      - id: step
+        name: Ask The Next Step
+        description: >
+          Ask the person the next step yourself — a card with the
+          question (and choices, or an attach button for a document) —
+          then check and record what they answered, exactly as answer
+          and attach do. Call again until done; an answer refused comes
+          back with its problems so the person can try again.
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data:  {application: [read, update], answer: [list, create, update], attachment: [list, create, update]}
+          files: {document: [read]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+        outputs:
+          type: object
+          required: [done, accepted, problems, remaining]
+          properties:
+            done:      {type: boolean}
+            field:     {type: string}
+            accepted:  {type: boolean}
+            problems:  {type: array, items: {type: string}}
+            remaining: {type: integer}
+            next:      {type: object}
+
+      - id: review
+        name: Review
+        description: >
+          The whole application: every answer and document so far, what
+          is still missing, and whether it is ready to submit.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {application: [read], answer: [list], attachment: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+        outputs:
+          type: object
+          required: [ready, status, answers, documents, missing]
+          properties:
+            ready:     {type: boolean}
+            status:    {type: string}
+            title:     {type: string}
+            answers:   {type: array, items: {type: object}}
+            documents: {type: array, items: {type: object}}
+            missing:   {type: array, items: {type: string}}
+            reference: {type: string}
+
+      - id: submit
+        name: Submit
+        description: >
+          Submit a ready application: it is closed to changes and given
+          a reference. The person's own final step; refused while
+          anything required is missing.
+        permission_level: 3
+        timeout_seconds: 15
+        resources:
+          data: {application: [read, update], answer: [list], attachment: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+        outputs:
+          type: object
+          required: [reference, submitted_at]
+          properties:
+            reference:    {type: string}
+            submitted_at: {type: string}
+
+      - id: withdraw
+        name: Withdraw
+        description: Withdraw a draft application; it is kept, closed, and can be read but not continued.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {application: [read, update], answer: [list], attachment: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [application_ref]
+          properties:
+            application_ref: {type: string, x-resource: {type: data, id: application}}
+        outputs:
+          type: object
+          required: [status]
+          properties:
+            status: {type: string}

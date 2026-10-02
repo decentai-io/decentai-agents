@@ -1,0 +1,678 @@
+# The Mail agent — any mail account, read and written through the
+# platform's gates, over the protocols mail has always spoken.
+#
+# The person connects an account with its address and an app password:
+# nothing is registered with a provider and nobody reviews anything.
+# Mail is read over IMAP and sent over SMTP, encrypted, from where this
+# agent runs to the account's own mail server.
+#
+# It does what the Gmail and Outlook agents do: finds messages, reads a
+# conversation whole, saves an attachment as a file, prepares replies
+# and new messages as DRAFTS, sends a draft only as a level-3 action
+# (an approval card in an ordinary chat), watches a conversation for a
+# reply so a schedule can wake the assistant only while the reply is
+# still missing, and watches the inbox so a schedule can wake it only
+# when mail has arrived.
+#
+# Fictional demo data lives in the tests, never here.
+
+schema_version: "1.0"
+
+agent:
+  id: mail
+  name: Mail
+  version: "0.1.1"
+  description: >
+    Any mail account, read and answered through the assistant: Gmail,
+    Yahoo, iCloud, Fastmail, or a mail server of your own. Connect it
+    with its address and an app password. Find a conversation, read it
+    whole, draft the reply and see it before anything is sent; sending
+    is a separate step you approve; a watch reminds you only while a
+    reply is still missing; and an inbox watch wakes the assistant only
+    when new mail has arrived.
+  tags:
+    - email
+    - imap
+    - productivity
+  examples:
+    - title: "Read a conversation"
+      prompt: "Find the latest email from Northlight about the chairs and read me the whole conversation."
+    - title: "Draft, do not send"
+      prompt: "Draft a reply to Dana at Harbourline saying we can furnish twenty desks by November, and show it to me before sending."
+    - title: "Remind me only if needed"
+      prompt: "Watch the Q-2041 conversation and remind me on Thursday morning if Northlight has not replied."
+    - title: "Watch the inbox"
+      prompt: "Watch my inbox for mail from harbourline.example and, whenever something arrives, read it and draft a reply for me to see."
+  instructions: >
+    Use this agent when the user wants to find, read, answer or follow
+    up on email in an account connected here with its address and an
+    app password. A person may have more than one account connected:
+    account.list names them, and every function that reads or writes
+    mail takes an optional account (the address) — pass it when the
+    user names an inbox or when the agent says several are connected;
+    a draft, a watch and an inbox watch remember the account they were
+    made on. Always find the conversation first (search.find, then
+    search.thread) and quote what it actually says; never invent a
+    message, a sender, a date or an id. search.find does NOT take a
+    query language: put a sender in from, a recipient in to, words of
+    the subject in subject, words found anywhere in query, and dates
+    in since and before (2026-09-03); leave every one of them empty for
+    the newest mail. It reads one folder: the account's archive of
+    everything where it has one, else the inbox; say folder sent for
+    what the user sent. A reply or a new message is prepared as a DRAFT
+    (draft.reply / draft.compose) and shown to the user before anything
+    is sent; draft.send is a separate external action that needs the
+    user's explicit go-ahead and may pause for approval. A send that
+    comes back "unknown" was handed to the mail server and not
+    confirmed — say so and do not send again; the user should check the
+    Sent folder. To be reminded when a conversation has not been
+    answered, record a watch (watch.await_reply) and schedule
+    watch.check with wake_field "unanswered". To act on mail as it
+    arrives, record an inbox watch ONCE (watch.inbox — narrow it with
+    only_from / skip_from when the user names senders) and schedule
+    watch.new_mail with wake_field "messages" every few minutes; each
+    wake carries only what arrived since the last check, with its
+    thread_id, so read the conversation and act on it as the user's
+    standing instruction says. Never record a second inbox watch for
+    the same request. Message and thread ids are the messages' own —
+    pass them on unchanged. When a sign-in is refused, the problem says
+    where the user makes an app password; pass that on as it is.
+
+implementation:
+  entrypoint: agent:MailAgent
+  dependencies: []
+
+# Where it connects, and the whole of it: the mail servers of the
+# providers it knows by name, each on the ports mail is read and sent
+# on, and the servers an account of another provider names.
+network:
+  hosts:
+    - imap.gmail.com:993
+    - smtp.gmail.com:465
+    - smtp.gmail.com:587
+    - imap.mail.yahoo.com:993
+    - smtp.mail.yahoo.com:465
+    - smtp.mail.yahoo.com:587
+    - imap.mail.me.com:993
+    - smtp.mail.me.com:587
+    - imap.fastmail.com:993
+    - smtp.fastmail.com:465
+    - smtp.fastmail.com:587
+    - {from_secret: account.imap_host, port: 993}
+    - {from_secret: account.smtp_host, port: 465}
+    - {from_secret: account.smtp_host, port: 587}
+
+resources:
+  secrets:
+    - id: account
+      label: Mail Account
+      description: >
+        A mail account: its address, and an APP PASSWORD made in the
+        provider's own security settings for one program to use — not
+        the account's own password, which most providers refuse here.
+        Choose the provider, or choose other and give the names of its
+        IMAP and SMTP servers. The password goes from where this agent
+        runs to the account's own mail server, encrypted, and nowhere
+        else. The two test fields are for tests only; leave them empty.
+      binding: {cardinality: one, required: true}
+      fields:
+        - {name: account,   label: Email Address, type: string, storage: keys,   required: true}
+        - name: provider
+          label: Provider
+          type: select
+          storage: keys
+          required: true
+          options: [gmail, yahoo, icloud, fastmail, other]
+        - {name: password,  label: App Password,  type: secret, storage: values, required: true}
+        - {name: imap_host, label: IMAP Server (for another provider), type: string, storage: keys, required: false}
+        - {name: smtp_host, label: SMTP Server (for another provider), type: string, storage: keys, required: false}
+        - {name: test_imap, label: IMAP Address (tests only), type: string, storage: keys, required: false}
+        - {name: test_smtp, label: SMTP Address (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: draft
+      label: Email Draft
+      description: A reply or new message prepared here, and what became of it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: kind,            label: Kind,            type: select, storage: keys, required: true, options: [reply, new]}
+        - {name: thread_id,       label: Thread ID,       type: string, storage: keys, required: false}
+        - {name: to,              label: To,              type: string, storage: keys, required: true}
+        - {name: cc,              label: Cc,              type: string, storage: keys, required: false}
+        - {name: subject,         label: Subject,         type: string, storage: keys, required: true}
+        # Kept readable: what is sent is what the person was shown.
+        - {name: body,            label: Body,            type: string, storage: keys, required: true}
+        - {name: in_reply_to,     label: In Reply To,     type: string, storage: keys, required: false}
+        - {name: references,      label: References,      type: string, storage: keys, required: false}
+        - {name: status,          label: Status,          type: select, storage: keys, required: true, options: [prepared, sent, unknown, discarded]}
+        - {name: account,         label: Account,         type: string, storage: keys, required: false}
+        - {name: sent_message_id, label: Sent Message ID, type: string, storage: keys, required: false}
+
+    - id: watch
+      label: Reply Watch
+      description: A conversation the user is waiting on, and where it stood when the watch began.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: thread_id,        label: Thread ID,         type: string, storage: keys, required: true}
+        - {name: subject,          label: Subject,           type: string, storage: keys, required: true}
+        - {name: since_message_id, label: Last Message Then, type: string, storage: keys, required: true}
+        - {name: status,           label: Status,            type: select, storage: keys, required: true, options: [waiting, replied, closed]}
+        - {name: account,          label: Account,           type: string, storage: keys, required: false}
+        - {name: note,             label: Note,              type: string, storage: keys, required: false}
+
+    - id: inbox
+      label: Inbox Watch
+      description: >
+        How far the inbox has been read on the user's behalf, in the
+        mail server's own count of its messages, and which senders
+        count.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: since,           label: Read Up To,        type: string, storage: keys, required: true}
+        - {name: folder_validity, label: Folder Validity,   type: string, storage: keys, required: true}
+        - {name: last_number,     label: Last Number Read,  type: string, storage: keys, required: true}
+        - {name: status,          label: Status,            type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: account,         label: Account,           type: string, storage: keys, required: false}
+        - {name: only_from,       label: Only From,         type: string, storage: keys, required: false}
+        - {name: skip_from,       label: Skip From,         type: string, storage: keys, required: false}
+        - {name: note,            label: Note,              type: string, storage: keys, required: false}
+
+  files:
+    - id: attachment
+      label: Saved Attachment
+      description: An attachment saved out of a message, for another agent to read.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - text/csv
+          - text/plain
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: account
+    name: Account
+    description: The connected mail account.
+    resources:
+      secrets: [account]
+    functions:
+      - id: status
+        name: Account Status
+        description: >
+          Confirm the account's mail server takes the sign-in and opens
+          the inbox, and which address it is. When it does not, problem
+          says why, and where an app password is made.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {account: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            account: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+      - id: list
+        name: Connected Accounts
+        description: >
+          Which accounts are connected to this agent, by address, and
+          which answers by default. When more than one is connected,
+          pass the one the user means as account on any other function.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {account: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [accounts]
+          properties:
+            accounts:
+              type: array
+              items:
+                type: object
+                properties:
+                  account:  {type: string}
+                  name:     {type: string}
+                  provider: {type: string}
+                  default:  {type: boolean}
+
+  - id: search
+    name: Search
+    description: Finds messages and reads conversations and attachments.
+    resources:
+      secrets: [account]
+      files:   [attachment]
+    functions:
+      - id: find
+        name: Find Messages
+        description: >
+          Find messages in one folder, newest first: by sender (from),
+          recipient (to), words of the subject (subject), words found
+          anywhere (query), dates (since and before, as 2026-09-03) and
+          unread_only. Every one is optional and they narrow together;
+          none at all is the newest mail. folder is inbox, sent, all, or
+          a folder's own name; left empty it is the account's archive of
+          everything where it has one, else the inbox. Returns one row
+          per message with its thread id. Use page_token to continue a
+          long result.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          secrets: {account: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            account:     {type: string, maxLength: 200}
+            query:       {type: string, maxLength: 300}
+            from:        {type: string, maxLength: 200}
+            to:          {type: string, maxLength: 200}
+            subject:     {type: string, maxLength: 200}
+            since:       {type: string, maxLength: 40}
+            before:      {type: string, maxLength: 40}
+            unread_only: {type: boolean, default: false}
+            folder:      {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:  {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [messages, total_estimate, folder]
+          properties:
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id: {type: string}
+                  thread_id:  {type: string}
+                  from:       {type: string}
+                  to:         {type: string}
+                  date:       {type: string}
+                  subject:    {type: string}
+                  snippet:    {type: string}
+                  unread:     {type: boolean}
+                  folder:     {type: string}
+            total_estimate:  {type: integer}
+            folder:          {type: string}
+            next_page_token: {type: string}
+
+      - id: thread
+        name: Read Conversation
+        description: >
+          Read one conversation whole: every message with sender,
+          recipients, date and body text (cut at max_body_chars), and
+          the conversation's attachments as one list, each naming the
+          message it belongs to and the id search.save_attachment
+          needs. thread_id is a row's thread_id; the message_id of any
+          message in the conversation finds it too.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          secrets: {account: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id]
+          properties:
+            account:        {type: string, maxLength: 200}
+            thread_id:      {type: string, minLength: 1, maxLength: 500}
+            max_body_chars: {type: integer, minimum: 200, maximum: 20000, default: 4000}
+        outputs:
+          type: object
+          required: [thread_id, subject, messages, attachments]
+          properties:
+            thread_id: {type: string}
+            subject:   {type: string}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id: {type: string}
+                  from:       {type: string}
+                  to:         {type: string}
+                  cc:         {type: string}
+                  date:       {type: string}
+                  subject:    {type: string}
+                  body:       {type: string}
+                  truncated:  {type: boolean}
+            attachments:
+              type: array
+              items:
+                type: object
+                properties:
+                  message_id:    {type: string}
+                  attachment_id: {type: string}
+                  filename:      {type: string}
+                  mime_type:     {type: string}
+                  size:          {type: integer}
+
+      - id: save_attachment
+        name: Save Attachment
+        description: >
+          Save one attachment of a message as a file, so another agent
+          (Documents, Spreadsheets) can read it by file_ref.
+        permission_level: 2
+        timeout_seconds: 120
+        resources:
+          secrets: {account: use}
+          files:   {attachment: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [message_id, attachment_id, filename]
+          properties:
+            account:       {type: string, maxLength: 200}
+            message_id:    {type: string, minLength: 1, maxLength: 500}
+            attachment_id: {type: string, minLength: 1, maxLength: 20}
+            filename:      {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [file_ref, filename, size]
+          properties:
+            file_ref:
+              type: string
+              x-resource: {type: file, id: attachment}
+            filename: {type: string}
+            size:     {type: integer}
+
+  - id: draft
+    name: Drafts
+    description: Prepares replies and new messages as drafts, and sends one on explicit authorization.
+    resources:
+      secrets: [account]
+      data:    [draft]
+    functions:
+      - id: reply
+        name: Draft Reply
+        description: >
+          Prepare a reply to a conversation as a draft, addressed to the
+          last person who wrote who is not the account itself, unless
+          "to" is given. Nothing is sent.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          secrets: {account: use}
+          data:    {draft: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id, body]
+          properties:
+            account:   {type: string, maxLength: 200}
+            thread_id: {type: string, minLength: 1, maxLength: 500}
+            body:      {type: string, minLength: 1, maxLength: 20000}
+            to:        {type: string, maxLength: 500}
+            cc:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [draft_ref, to, subject]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+            to:      {type: string}
+            subject: {type: string}
+
+      - id: compose
+        name: Draft New Message
+        description: Prepare a new message as a draft. Nothing is sent.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {account: use}
+          data:    {draft: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [to, subject, body]
+          properties:
+            account: {type: string, maxLength: 200}
+            to:      {type: string, minLength: 3, maxLength: 500}
+            cc:      {type: string, maxLength: 500}
+            subject: {type: string, minLength: 1, maxLength: 300}
+            body:    {type: string, minLength: 1, maxLength: 20000}
+        outputs:
+          type: object
+          required: [draft_ref, to, subject]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+            to:      {type: string}
+            subject: {type: string}
+
+      - id: send
+        name: Send Draft
+        description: >
+          Send a prepared draft. An external, irreversible action: only
+          on the user's explicit go-ahead. Succeeds only when the mail
+          server takes the message; an unconfirmed outcome is reported
+          as unknown and is never retried here. A copy is put in the
+          account's Sent folder where the server kept none itself.
+        permission_level: 3
+        timeout_seconds: 120
+        resources:
+          secrets: {account: use}
+          data:    {draft: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [draft_ref]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+        outputs:
+          type: object
+          required: [sent, status]
+          properties:
+            sent:         {type: boolean}
+            status:       {type: string, enum: [sent, unknown]}
+            message_id:   {type: string}
+            thread_id:    {type: string}
+            kept_in_sent: {type: boolean}
+            problem:      {type: string}
+
+      - id: discard
+        name: Discard Draft
+        description: Mark a prepared draft discarded. It is never sent.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          data: {draft: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [draft_ref]
+          properties:
+            draft_ref:
+              type: string
+              x-resource: {type: data, id: draft}
+        outputs:
+          type: object
+          required: [discarded]
+          properties:
+            discarded: {type: boolean}
+
+  - id: watch
+    name: Watches
+    description: >
+      Remembers conversations the user is waiting on and checks whether
+      they were answered; remembers how far the inbox has been read and
+      hands on what arrived since.
+    resources:
+      secrets: [account]
+      data:    [watch, inbox]
+    functions:
+      - id: await_reply
+        name: Await Reply
+        description: >
+          Record that the user is waiting for a reply on a
+          conversation, from this moment. Pair with a schedule on
+          watch.check.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          secrets: {account: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [thread_id]
+          properties:
+            account:   {type: string, maxLength: 200}
+            thread_id: {type: string, minLength: 1, maxLength: 500}
+            note:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, subject, since_message_id]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            subject:          {type: string}
+            thread_id:        {type: string}
+            since_message_id: {type: string}
+
+      - id: check
+        name: Check For Replies
+        description: >
+          Check every waiting watch (or one, by watch_ref) against the
+          mailbox. "unanswered" lists the conversations still without a
+          reply from someone other than the account — empty once all
+          were answered. Schedule it with wake_field "unanswered" to be
+          woken only while a reply is still missing.
+        permission_level: 1
+        timeout_seconds: 120
+        schedulable: true
+        resources:
+          secrets: {account: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+        outputs:
+          type: object
+          required: [checked, unanswered, answered]
+          properties:
+            checked: {type: integer}
+            unanswered:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref: {type: string, x-resource: {type: data, id: watch}}
+                  thread_id: {type: string}
+                  subject:   {type: string}
+                  note:      {type: string}
+            answered:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:  {type: string, x-resource: {type: data, id: watch}}
+                  thread_id:  {type: string}
+                  subject:    {type: string}
+                  reply_from: {type: string}
+                  reply_date: {type: string}
+                  message_id: {type: string}
+
+      - id: inbox
+        name: Watch The Inbox
+        description: >
+          Start watching the inbox for new mail. LEAVE "since" EMPTY to
+          start from now, which is almost always what is meant. A
+          "since" is only for starting in the past, and must carry its
+          UTC offset (2026-09-20T17:51:00+04:00): a time without one is
+          read as UTC, not as the person's zone, and one in the future
+          is taken as now. Optionally count only some senders:
+          only_from / skip_from take addresses or "@domain"s,
+          comma-separated. Record it once, then schedule watch.new_mail.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          secrets: {account: use}
+          data:    {inbox: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            account:   {type: string, maxLength: 200}
+            since:     {type: string, maxLength: 40}
+            only_from: {type: string, maxLength: 500}
+            skip_from: {type: string, maxLength: 500}
+            note:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [inbox_ref, since]
+          properties:
+            inbox_ref:
+              type: string
+              x-resource: {type: data, id: inbox}
+            since: {type: string}
+            note:  {type: string}
+
+      - id: new_mail
+        name: New Mail
+        description: >
+          What arrived in the inbox since the last check, for every
+          inbox watch (or one, by inbox_ref): one row per message,
+          oldest first, shaped like search.find, each naming its watch.
+          Mail from the account itself and from senders the watch leaves
+          out is not reported. Moves the watch forward; "more" says a
+          later check continues. Schedule it with wake_field "messages"
+          to be woken only when something arrived.
+        permission_level: 1
+        timeout_seconds: 120
+        schedulable: true
+        resources:
+          secrets: {account: use}
+          data:    {inbox: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            inbox_ref:
+              type: string
+              x-resource: {type: data, id: inbox}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, messages, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  inbox_ref:  {type: string, x-resource: {type: data, id: inbox}}
+                  message_id: {type: string}
+                  thread_id:  {type: string}
+                  from:       {type: string}
+                  to:         {type: string}
+                  date:       {type: string}
+                  subject:    {type: string}
+                  snippet:    {type: string}

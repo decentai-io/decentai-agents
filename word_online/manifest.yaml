@@ -1,0 +1,484 @@
+# The Word Online agent — Word documents in one Microsoft 365 OneDrive,
+# read, edited and watched through the platform's gates.
+#
+# Microsoft Graph has NO API for what is inside a Word document: no
+# paragraphs, no comments, no edits. What Graph has is the file. So this
+# agent downloads the .docx (/me/drive/items/{id}/content), reads it with
+# python-docx, reads comments straight from the package's
+# word/comments.xml, and — for an edit — changes the file and uploads it
+# whole with If-Match on the eTag it was proposed against, so a save by
+# someone else in between is refused rather than overwritten. It cannot
+# add, answer or resolve comments; Graph offers no way to, and writing
+# comment XML into a file other people have open is not a safe
+# substitute.
+
+schema_version: "1.0"
+
+agent:
+  id: word_online
+  name: Word Online
+  version: "0.1.2"
+  description: >
+    Word documents in your OneDrive, through the assistant. Read one by
+    paragraph with its comments, propose a change and save it on your
+    go-ahead, and be told when a document changes or gets a comment.
+  tags:
+    - documents
+    - word
+    - microsoft
+    - productivity
+  examples:
+    - title: "Read a document"
+      prompt: "Open the Sidra returns policy in my OneDrive and tell me what it says about damaged goods."
+    - title: "See the comments"
+      prompt: "What comments are on the Harbourline proposal, and which paragraphs are they on?"
+    - title: "Propose, then save"
+      prompt: "In the Harbourline proposal, change the delivery paragraph to say ten working days, show me, and save it when I say so."
+    - title: "Watch a document"
+      prompt: "Watch the Harbourline proposal and tell me when someone changes it or leaves a comment."
+  instructions: >
+    Use this agent to read, edit or watch Word (.docx) documents in the
+    user's OneDrive. Find a document first (docs.find) and take its
+    item_id from there; never invent one. docs.read returns numbered
+    paragraphs a slice at a time with the total; continue with
+    next_from, and quote paragraphs with their numbers. comments.list
+    reads the comments the file holds, with the paragraph each sits on;
+    this agent cannot add, answer or resolve comments — say so and
+    suggest doing it in Word. To change text, call edits.propose with the
+    paragraph number and the full new text of that one paragraph, show
+    the person the old and new text side by side, and only on their
+    go-ahead call edits.apply. An apply refused because the file changed
+    means read it again and propose again — never retry the old edit. An
+    apply that comes back "unknown" was not confirmed by Microsoft: say
+    so and ask the person to look at the document. To hear about changes
+    and new comments, record a watch once (changes.watch) and schedule
+    changes.new with wake_field "changes".
+
+implementation:
+  entrypoint: agent:WordOnlineAgent
+  dependencies:
+    - requests>=2.31,<3
+    - python-docx>=1.1,<2
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - graph.microsoft.com
+    # where a download is redirected to
+    - "*.sharepoint.com"
+    - "*.1drv.com"
+    - "*.microsoftpersonalcontent.com"
+
+resources:
+  secrets:
+    - id: microsoft
+      label: Microsoft Account
+      description: >
+        A Microsoft 365 account, connected by signing in — the same
+        connection the Outlook, Microsoft Calendar, OneDrive and Teams
+        agents use; grant one saved account to each. The platform keeps
+        and refreshes the tokens; this agent receives a short-lived
+        access token. api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: microsoft
+        authorize_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+        token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+        scopes:
+          - openid
+          - email
+          - offline_access
+          - User.Read
+          - Mail.ReadWrite
+          - Mail.Send
+          - Calendars.ReadWrite
+          - Files.ReadWrite.All
+          - Chat.ReadWrite
+          - Team.ReadBasic.All
+          - Channel.ReadBasic.All
+          - ChannelMessage.Send
+          - Tasks.ReadWrite
+        identity: {url: https://graph.microsoft.com/v1.0/me, field: userPrincipalName}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: edit
+      label: Proposed Edit
+      description: >
+        One paragraph's change: the text as it was read, the text to put
+        in its place, the file's eTag when it was proposed, and what
+        became of it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: item_id,      label: Item ID,       type: string, storage: keys, required: true}
+        - {name: name,         label: Document,      type: string, storage: keys, required: true}
+        - {name: paragraph,    label: Paragraph,     type: number, storage: keys, required: true}
+        - {name: old_text,     label: Text As Read,  type: string, storage: keys, required: true}
+        - {name: new_text,     label: New Text,      type: string, storage: keys, required: true}
+        - {name: etag,         label: Version Then,  type: string, storage: keys, required: true}
+        - {name: status,       label: Status,        type: select, storage: keys, required: true, options: [proposed, applied, refused, unknown, discarded]}
+        - {name: reason,       label: Why,           type: string, storage: keys, required: false}
+        - {name: applied_etag, label: Version After, type: string, storage: keys, required: false}
+        - {name: note,         label: Note,          type: string, storage: keys, required: false}
+
+    - id: watch
+      label: Document Watch
+      description: >
+        A Word document as the agent last saw it on the user's behalf:
+        its eTag, when it was last modified, and a fingerprint of each
+        comment it held.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: item_id,      label: Item ID,          type: string, storage: keys, required: true}
+        - {name: name,         label: Document,         type: string, storage: keys, required: true}
+        - {name: modified,     label: Last Modified,    type: string, storage: keys, required: true}
+        - {name: etag,         label: Version,          type: string, storage: keys, required: true}
+        - {name: comment_keys, label: Comments Seen,    type: string, storage: keys, required: false}
+        - {name: status,       label: Status,           type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,         label: Note,             type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Microsoft 365 account.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Microsoft connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: docs
+    name: Documents
+    description: Finds Word documents in OneDrive and reads one as numbered paragraphs.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: find
+        name: Find Documents
+        description: Word (.docx) files in OneDrive whose name or content matches query, newest change first.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query:       {type: string, minLength: 1, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+        outputs:
+          type: object
+          required: [documents]
+          properties:
+            documents:
+              type: array
+              items:
+                type: object
+                properties:
+                  item_id:     {type: string}
+                  name:        {type: string}
+                  modified:    {type: string}
+                  modified_by: {type: string}
+                  size:        {type: integer}
+                  link:        {type: string}
+
+      - id: read
+        name: Read Document
+        description: >
+          A Word document as numbered paragraphs (index from 1, style name
+          such as "Heading 1", text; table cells included and marked
+          in_table), from paragraph "from", at most max_paragraphs and
+          max_chars at a time, with total_paragraphs, the file's eTag and
+          when and by whom it was last modified. next_from continues.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:        {type: string, minLength: 1, maxLength: 200}
+            from:           {type: integer, minimum: 1, default: 1}
+            max_paragraphs: {type: integer, minimum: 1, maximum: 200, default: 50}
+            max_chars:      {type: integer, minimum: 500, maximum: 40000, default: 20000}
+        outputs:
+          type: object
+          required: [item_id, name, etag, modified, total_paragraphs, from, paragraphs]
+          properties:
+            item_id:          {type: string}
+            name:             {type: string}
+            etag:             {type: string}
+            modified:         {type: string}
+            modified_by:      {type: string}
+            total_paragraphs: {type: integer}
+            from:             {type: integer}
+            next_from:        {type: integer}
+            comment_count:    {type: integer}
+            link:             {type: string}
+            paragraphs:
+              type: array
+              items:
+                type: object
+                properties:
+                  index:     {type: integer}
+                  style:     {type: string}
+                  text:      {type: string}
+                  in_table:  {type: boolean}
+                  truncated: {type: boolean}
+
+  - id: comments
+    name: Comments
+    description: Reads the comments a Word file holds. Graph offers no way to add or answer them.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: list
+        name: List Comments
+        description: >
+          The comments in a Word document, read from the file: author,
+          date, text, and the paragraph each sits on (its number and
+          text; 0 when the file does not say). Paged by "from" with the
+          total.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:     {type: string, minLength: 1, maxLength: 200}
+            from:        {type: integer, minimum: 1, default: 1}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 25}
+        outputs:
+          type: object
+          required: [item_id, name, etag, total, from, comments]
+          properties:
+            item_id:   {type: string}
+            name:      {type: string}
+            etag:      {type: string}
+            total:     {type: integer}
+            from:      {type: integer}
+            next_from: {type: integer}
+            comments:
+              type: array
+              items:
+                type: object
+                properties:
+                  comment_id:     {type: string}
+                  author:         {type: string}
+                  date:           {type: string}
+                  text:           {type: string}
+                  paragraph:      {type: integer}
+                  paragraph_text: {type: string}
+
+  - id: edits
+    name: Edits
+    description: >
+      Proposes a change to one paragraph as a record, and saves it into
+      the file only on authorization and only if nobody saved the file
+      since.
+    resources:
+      secrets: [microsoft]
+      data:    [edit]
+    functions:
+      - id: propose
+        name: Propose Edit
+        description: >
+          Record a change to one paragraph (its number from docs.read):
+          the text as it reads now, new_text to replace it (one
+          paragraph, no line breaks; the paragraph's style and its first
+          run's formatting are kept), and the file's eTag. Nothing in the
+          file changes; show the person old and new text before applying.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+          data:    {edit: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id, paragraph, new_text]
+          properties:
+            item_id:   {type: string, minLength: 1, maxLength: 200}
+            paragraph: {type: integer, minimum: 1}
+            new_text:  {type: string, maxLength: 8000}
+            note:      {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [edit_ref, name, paragraph, old_text, new_text, etag]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+            name:      {type: string}
+            paragraph: {type: integer}
+            old_text:  {type: string}
+            new_text:  {type: string}
+            etag:      {type: string}
+            link:      {type: string}
+
+      - id: apply
+        name: Apply Edit
+        description: >
+          Save a proposed edit into the Word file, which everyone who can
+          open it will see. Refused when the file changed after the
+          proposal (or while saving); the edit is then marked refused and
+          must be proposed again from a fresh read. Documents over 750 KB
+          are refused with their size. An unconfirmed outcome is reported
+          as unknown and never retried. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 120
+        resources:
+          secrets: {microsoft: use}
+          data:    {edit: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [edit_ref]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+        outputs:
+          type: object
+          required: [applied, status]
+          properties:
+            applied:   {type: boolean}
+            status:    {type: string, enum: [applied]}
+            paragraph: {type: integer}
+            etag:      {type: string}
+            link:      {type: string}
+
+      - id: discard
+        name: Discard Edit
+        description: Mark a proposed edit discarded. The file is not touched.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {edit: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [edit_ref]
+          properties:
+            edit_ref:
+              type: string
+              x-resource: {type: data, id: edit}
+        outputs:
+          type: object
+          required: [discarded]
+          properties:
+            discarded: {type: boolean}
+
+  - id: changes
+    name: Changes
+    description: Watches Word documents for saves and new comments.
+    resources:
+      secrets: [microsoft]
+      data:    [watch]
+    functions:
+      - id: watch
+        name: Watch a Document
+        description: >
+          Start watching a Word document for changes and new comments,
+          from now. Record it once, then schedule changes.new.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+            note:    {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, name, modified]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            name:          {type: string}
+            modified:      {type: string}
+            comment_count: {type: integer}
+
+      - id: new
+        name: Document Changes
+        description: >
+          For every document watch (or one, by watch_ref), whether the
+          file was saved since the last check — who saved it and when —
+          with its new comments in "comments". A save by the account
+          itself with no new comment from anyone else is not reported.
+          Moves the watch forward; "more" says a later check continues.
+          Schedule it with wake_field "changes" to be woken only when a
+          document changed.
+        permission_level: 1
+        timeout_seconds: 120
+        schedulable: true
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+        outputs:
+          type: object
+          required: [checked, changes, comments, more]
+          properties:
+            checked:            {type: integer}
+            more:               {type: boolean}
+            comments_not_shown: {type: integer}
+            changes:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:    {type: string, x-resource: {type: data, id: watch}}
+                  item_id:      {type: string}
+                  name:         {type: string}
+                  modified:     {type: string}
+                  modified_by:  {type: string}
+                  new_comments: {type: integer}
+                  link:         {type: string}
+            comments:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:      {type: string, x-resource: {type: data, id: watch}}
+                  item_id:        {type: string}
+                  author:         {type: string}
+                  date:           {type: string}
+                  text:           {type: string}
+                  paragraph:      {type: integer}
+                  paragraph_text: {type: string}

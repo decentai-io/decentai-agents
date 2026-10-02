@@ -1,0 +1,15 @@
+# What the tests need beside a checkout of the platform (README, "Run the
+# tests"). An agent's own dependencies are not here: the harness installs
+# the ones its manifest declares into an environment of its own, as the
+# platform does.
+pytest>=8
+pyyaml>=6
+jsonschema>=4.21
+pydantic>=2.7
+requests>=2.31
+openpyxl>=3.1
+python-docx>=1.1
+
+# Only to remake the committed sample files (tests/make_sample_*.py).
+reportlab>=4
+python-pptx>=0.6.23

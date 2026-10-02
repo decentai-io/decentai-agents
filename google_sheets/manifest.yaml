@@ -1,0 +1,431 @@
+# The Google Sheets agent — live Google spreadsheets, read, written and
+# watched through the platform's gates, over the Sheets API (v4).
+#
+# Not the Sheets agent: that one reads a workbook FILE handed to the
+# platform. This one works in the spreadsheet itself, where other people
+# are working too. It finds a spreadsheet through Drive, shows its tabs,
+# reads a range, and — each only on the user's go-ahead — appends rows
+# or overwrites cells, keeping a record of what it wrote and what the
+# cells held before. A rows watch hands on the rows added to a tab since
+# the last look, which is how form responses and sign-ups arrive.
+
+schema_version: "1.0"
+
+agent:
+  id: google_sheets
+  name: Google Sheets
+  version: "0.1.2"
+  description: >
+    Your Google Sheets, through the assistant. Read a tab, add rows or
+    change cells on your go-ahead, and hear about new rows as they
+    arrive.
+  tags:
+    - spreadsheets
+    - google
+    - productivity
+  examples:
+    - title: "Read a sheet"
+      prompt: "Open the Supplier price list spreadsheet and tell me which items went up this month."
+    - title: "Add a row"
+      prompt: "Add a row to the Orders tab of Sidra orders 2026: today, Harbourline, 20 office chairs, 1,840.00."
+    - title: "Watch for sign-ups"
+      prompt: "Every morning, tell me who signed up on the Workshop sign-ups sheet since yesterday."
+  instructions: >
+    Use this agent for live Google Sheets. Spreadsheets are addressed by
+    spreadsheet_id: take it from spreadsheets.find, never invent one.
+    Call spreadsheets.get before reading or writing to learn the tab
+    names; a tab is named in tab, and cells like "A1:F50" go in cells,
+    without the tab. values.read shows at most a couple of hundred
+    cells: when truncated is true, read on from next_row rather than
+    guessing what the rest holds. values.append adds rows at the end of
+    a tab; values.update overwrites cells from start_cell. Both change a
+    sheet other people see and may pause for approval: say exactly which
+    rows or cells will change, and for an update what they hold now.
+    Cells are text as a person would type them — "1840.00",
+    "2026-09-14", "=SUM(D2:D20)" — and Google interprets them. To hear
+    about new rows (form responses, sign-ups), record rows.watch once,
+    then schedule rows.new with wake_field "rows". A watch counts rows:
+    it sees rows added at the end, not edits in the middle; when rows.new
+    reports a reset, tell the user rows were removed and nothing was
+    guessed.
+
+implementation:
+  entrypoint: agent:GoogleSheetsAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - sheets.googleapis.com
+    - www.googleapis.com
+
+resources:
+  secrets:
+    - id: google
+      label: Google Account
+      description: >
+        A Google account, connected by signing in — the same connection
+        every Google agent uses; grant one saved account to all of them.
+        The platform keeps and refreshes the tokens; this agent receives
+        a short-lived access token. api_base_url is for tests only; leave
+        it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: google
+        authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+        token_url: https://oauth2.googleapis.com/token
+        scopes:
+          - openid
+          - https://www.googleapis.com/auth/userinfo.email
+          - https://www.googleapis.com/auth/gmail.modify
+          - https://www.googleapis.com/auth/calendar
+          - https://www.googleapis.com/auth/drive
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/forms.body.readonly
+          - https://www.googleapis.com/auth/forms.responses.readonly
+          - https://www.googleapis.com/auth/tasks
+        authorize_params: {access_type: offline, prompt: consent}
+        identity: {url: https://openidconnect.googleapis.com/v1/userinfo, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: write
+      label: Sheet Write
+      description: >
+        Every append and overwrite this agent made: where, how much, what
+        it wrote, and for an overwrite what the cells held before.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: spreadsheet_id, label: Spreadsheet ID, type: string, storage: keys,   required: true}
+        - {name: spreadsheet,    label: Spreadsheet,    type: string, storage: keys,   required: true}
+        - {name: tab,            label: Tab,            type: string, storage: keys,   required: true}
+        - {name: kind,           label: Kind,           type: select, storage: keys,   required: true, options: [append, update]}
+        - {name: range,          label: Range,          type: string, storage: keys,   required: true}
+        - {name: rows,           label: Rows,           type: number, storage: keys,   required: true}
+        - {name: cells,          label: Cells,          type: number, storage: keys,   required: false}
+        - {name: link,           label: Link,           type: string, storage: keys,   required: false}
+        - {name: written,        label: Written,        type: object, storage: values, required: true}
+        - {name: previous,       label: Before,         type: object, storage: values, required: false}
+
+    - id: watch
+      label: Rows Watch
+      description: >
+        A tab being watched for new rows: which one, which row holds the
+        column names, and how many rows have been handed on so far.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: spreadsheet_id, label: Spreadsheet ID,  type: string, storage: keys, required: true}
+        - {name: spreadsheet,    label: Spreadsheet,     type: string, storage: keys, required: true}
+        - {name: tab,            label: Tab,             type: string, storage: keys, required: true}
+        - {name: sheet_id,       label: Tab ID,          type: number, storage: keys, required: true}
+        - {name: header_row,     label: Header Row,      type: number, storage: keys, required: true}
+        - {name: cursor,         label: Rows Seen,       type: number, storage: keys, required: true}
+        - {name: status,         label: Status,          type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,           label: Note,            type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Google account.
+    resources:
+      secrets: [google]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Google connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: spreadsheets
+    name: Spreadsheets
+    description: Finds spreadsheets and shows what tabs they hold.
+    resources:
+      secrets: [google]
+    functions:
+      - id: find
+        name: Find Spreadsheets
+        description: >
+          Spreadsheets whose name contains name (all of them when it is
+          empty), most recently changed first, with links. Use
+          page_token to continue.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            name:        {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:  {type: string, maxLength: 2000}
+        outputs:
+          type: object
+          required: [spreadsheets]
+          properties:
+            spreadsheets:
+              type: array
+              items:
+                type: object
+                properties:
+                  spreadsheet_id: {type: string}
+                  name:           {type: string}
+                  modified:       {type: string}
+                  owner:          {type: string}
+                  link:           {type: string}
+            next_page_token: {type: string}
+
+      - id: get
+        name: Get Spreadsheet
+        description: >
+          A spreadsheet's title, link and tabs — each tab's name, id and
+          grid size (the grid is the tab's rows and columns, not how many
+          hold data).
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [spreadsheet_id]
+          properties:
+            spreadsheet_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [spreadsheet_id, title, link, tab_count, tabs]
+          properties:
+            spreadsheet_id: {type: string}
+            title:          {type: string}
+            link:           {type: string}
+            tab_count:      {type: integer}
+            tabs:
+              type: array
+              items:
+                type: object
+                properties:
+                  tab:          {type: string}
+                  sheet_id:     {type: integer}
+                  index:        {type: integer}
+                  grid_rows:    {type: integer}
+                  grid_columns: {type: integer}
+
+  - id: values
+    name: Values
+    description: Reads cells freely; appends and overwrites only on authorization.
+    resources:
+      secrets: [google]
+      data:    [write]
+    functions:
+      - id: read
+        name: Read Cells
+        description: >
+          Rows from a tab as lists, the whole tab or cells like "A1:F50".
+          With header (the default) the first row of the range comes back
+          apart as header. Long cells are clipped; at most max_rows rows
+          and about 200 cells are shown — truncated and next_row say
+          where to read on.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [spreadsheet_id, tab]
+          properties:
+            spreadsheet_id: {type: string, minLength: 1, maxLength: 200}
+            tab:            {type: string, minLength: 1, maxLength: 200}
+            cells:          {type: string, maxLength: 30}
+            header:         {type: boolean, default: true}
+            max_rows:       {type: integer, minimum: 1, maximum: 100, default: 50}
+        outputs:
+          type: object
+          required: [tab, range, header, rows, first_row, total_rows, shown_rows, truncated]
+          properties:
+            tab:           {type: string}
+            range:         {type: string}
+            header:        {type: array, items: {type: string}}
+            rows:          {type: array, items: {type: array, items: {type: string}}}
+            first_row:     {type: integer}
+            total_rows:    {type: integer}
+            shown_rows:    {type: integer}
+            truncated:     {type: boolean}
+            next_row:      {type: integer}
+            clipped_cells: {type: integer}
+
+      - id: append
+        name: Append Rows
+        description: >
+          Add rows at the end of a tab's table, as a person would type
+          them (Google interprets numbers, dates and formulas). Nothing
+          already in the tab is overwritten. Changes a shared sheet —
+          only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [spreadsheet_id, tab, rows]
+          properties:
+            spreadsheet_id: {type: string, minLength: 1, maxLength: 200}
+            tab:            {type: string, minLength: 1, maxLength: 200}
+            rows:
+              type: array
+              minItems: 1
+              maxItems: 25
+              items: {type: array, minItems: 1, maxItems: 40, items: {type: string, maxLength: 5000}}
+        outputs:
+          type: object
+          required: [write_ref, updated_range, updated_rows, updated_cells]
+          properties:
+            write_ref:     {type: string, x-resource: {type: data, id: write}}
+            updated_range: {type: string}
+            updated_rows:  {type: integer}
+            updated_cells: {type: integer}
+
+      - id: update
+        name: Overwrite Cells
+        description: >
+          Overwrite cells from start_cell ("B2") rightwards and down with
+          rows. What the cells held before is read first, returned as
+          previous and kept on the record. Cannot write past the tab's
+          grid; use append to add rows. Changes a shared sheet — only on
+          the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [spreadsheet_id, tab, start_cell, rows]
+          properties:
+            spreadsheet_id: {type: string, minLength: 1, maxLength: 200}
+            tab:            {type: string, minLength: 1, maxLength: 200}
+            start_cell:     {type: string, minLength: 2, maxLength: 12}
+            rows:
+              type: array
+              minItems: 1
+              maxItems: 25
+              items: {type: array, minItems: 1, maxItems: 40, items: {type: string, maxLength: 5000}}
+        outputs:
+          type: object
+          required: [write_ref, updated_range, updated_cells, previous, previous_truncated]
+          properties:
+            write_ref:          {type: string, x-resource: {type: data, id: write}}
+            updated_range:      {type: string}
+            updated_cells:      {type: integer}
+            previous:           {type: array, items: {type: array, items: {type: string}}}
+            previous_truncated: {type: boolean}
+
+  - id: rows
+    name: Rows Watch
+    description: >
+      Remembers how many rows a tab had and hands on the rows added since
+      — form responses, sign-ups, orders.
+    resources:
+      secrets: [google]
+      data:    [watch]
+    functions:
+      - id: watch
+        name: Watch A Tab
+        description: >
+          Start watching a tab for new rows, from now: the rows already
+          there are not news. header_row names the row holding the column
+          names (1 by default, 0 for none). Record it once, then schedule
+          rows.new.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [spreadsheet_id, tab]
+          properties:
+            spreadsheet_id: {type: string, minLength: 1, maxLength: 200}
+            tab:            {type: string, minLength: 1, maxLength: 200}
+            header_row:     {type: integer, minimum: 0, maximum: 1000, default: 1}
+            note:           {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, tab, header, cursor]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+            tab:       {type: string}
+            header:    {type: array, items: {type: string}}
+            cursor:    {type: integer}
+
+      - id: new
+        name: New Rows
+        description: >
+          Rows added since the last check, for every rows watch (or one,
+          by watch_ref), oldest first: each names its watch, its row
+          number, and its cells keyed by column name. Moves the watch
+          forward; "more" says a later check continues. A tab with fewer
+          rows than before hands on nothing and is listed in reset with
+          a sentence. Schedule it with wake_field "rows" to be woken only
+          when rows arrived.
+        permission_level: 1
+        timeout_seconds: 90
+        schedulable: true
+        resources:
+          secrets: {google: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, rows, reset, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            rows:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+                  spreadsheet: {type: string}
+                  tab:         {type: string}
+                  row:         {type: integer}
+                  cells:       {type: object}
+            reset:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+                  spreadsheet: {type: string}
+                  tab:         {type: string}
+                  cursor:      {type: integer}
+                  message:     {type: string}

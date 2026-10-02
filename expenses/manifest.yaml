@@ -1,0 +1,517 @@
+# The Expenses agent — receipts into a claim, honestly.
+#
+# Reads receipts that carry text (PDF text layer, plain text) with the
+# chat's model, then checks every extracted fact against the receipt's
+# own text: an amount not on the receipt, a date the parser cannot
+# read, a currency the receipt does not show, all mean "needs review",
+# never a guess. A photo receipt cannot be read here and is recorded
+# for manual entry with the file kept. Duplicates are matched by
+# merchant, date and amount; the policy is rules with quoted sources;
+# a claim's status moves to approved or paid only on a named
+# reviewer's word, never because a claim was prepared.
+
+schema_version: "1.0"
+
+agent:
+  id: expenses
+  name: Expenses
+  version: "0.1.9"
+  description: >
+    Turns receipts into an expense claim you can defend: every
+    merchant, date and amount is read from the receipt's own text and
+    quoted back, duplicates are matched in code, the company policy is
+    applied as rules with their sources, and a claim becomes approved
+    only on a named reviewer's word.
+  tags:
+    - expenses
+    - receipts
+    - claims
+    - finance
+  examples:
+    - title: "Build a claim"
+      prompt: "Turn these receipts into an expense claim for my Dubai trip."
+    - title: "Check the rules"
+      prompt: "Which lines in my claim break the policy, and which rule does each break?"
+    - title: "Submit"
+      prompt: "Submit the claim for approval."
+  instructions: >
+    Use this agent when someone has receipts to claim or a claim to
+    review. A claim that already exists is found here, not in mail or
+    files: list the claims (claims.list) and use its claim_ref. For a
+    new one, create the claim (claims.create), then read each receipt
+    into it (receipts.read) — the result says which fields are
+    extracted and verified, which are assumed, and whether the receipt
+    needs review; a photo cannot be read and is recorded for manual
+    entry, so ask the person for its details and confirm them
+    (receipts.confirm). Never fill in an amount, a date or a currency
+    yourself: a receipt in another currency is claimed in that currency
+    and flagged, never converted. Load the company policy once
+    (policies.load from the policy document, or policies.set_rule) and
+    run claims.check for duplicates, meal allowance and other
+    exceptions before producing the workbook (claims.workbook). A claim
+    is submitted when the person says so (claims.set_status); approved
+    and paid are a reviewer's decisions — record them with the
+    reviewer's name, and never say a claim is approved or paid because
+    it was prepared.
+
+implementation:
+  entrypoint: agent:ExpensesAgent
+  dependencies:
+    - pypdf>=4.2,<6
+    - openpyxl>=3.1,<4
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: claim
+      label: Expense Claim
+      description: One claim — whose, what for, where it stands.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: title,     label: Title,     type: string, storage: keys, required: true}
+        - {name: claimant,  label: Claimant,  type: string, storage: keys, required: true}
+        - {name: status,    label: Status,    type: select, storage: keys, required: true, options: [draft, submitted, approved, rejected, paid]}
+        - {name: currency,  label: Currency,  type: string, storage: keys, required: true}
+        - {name: decided_by, label: Decided By, type: string, storage: keys, required: false}
+        - {name: decided_on, label: Decided On, type: string, storage: keys, required: false}
+        - {name: note,      label: Note,      type: string, storage: keys, required: false}
+
+    - id: receipt
+      label: Receipt
+      description: One receipt in a claim — what was read, what was verified, what needs review.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: claim_ref,   label: Claim,       type: string, storage: keys, required: true}
+        - {name: file_ref,    label: File,        type: string, storage: keys, required: true}
+        - {name: filename,    label: Filename,    type: string, storage: keys, required: false}
+        - {name: merchant,    label: Merchant,    type: string, storage: keys, required: false}
+        - {name: date,        label: Date,        type: string, storage: keys, required: false}
+        - {name: currency,    label: Currency,    type: string, storage: keys, required: false}
+        - {name: amount,      label: Amount,      type: number, storage: keys, required: false}
+        - {name: category,    label: Category,    type: select, storage: keys, required: true, options: [meals, travel, accommodation, transport, office, other, unknown]}
+        - {name: status,      label: Status,      type: select, storage: keys, required: true, options: [extracted, needs_review, manual, confirmed, duplicate]}
+        - {name: verified,    label: Verified,    type: string, storage: keys, required: false}
+        - {name: assumed,     label: Assumed,     type: string, storage: keys, required: false}
+        - {name: duplicate_of, label: Duplicate Of, type: string, storage: keys, required: false}
+        - {name: note,        label: Note,        type: string, storage: keys, required: false}
+
+    - id: rule
+      label: Policy Rule
+      description: One rule of the expense policy, with the sentence it came from.
+      binding: {cardinality: many, required: false}
+      user_access: [create, update]
+      fields:
+        - {name: name,   label: Rule,   type: select, storage: keys, required: true, options: [meal_max_per_day, hotel_max_per_night, receipt_required_above, taxi_max_per_trip, claim_within_days, alcohol_allowed]}
+        - {name: value,  label: Value,  type: string, storage: keys, required: true}
+        - {name: quote,  label: Source, type: string, storage: keys, required: false}
+        - {name: source, label: Policy File, type: string, storage: keys, required: false}
+
+  files:
+    - id: receipt_file
+      label: Receipt
+      description: A receipt as uploaded — PDF, text, or a photo kept for manual entry.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types: [application/pdf, text/plain, image/jpeg, image/png]
+        max_size_mb: 25  # the platform's upload limit
+    - id: policy_file
+      label: Policy Document
+      description: The expense policy, as uploaded.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types: [application/pdf, text/plain, text/markdown]
+        max_size_mb: 25  # the platform's upload limit
+    - id: workbook
+      label: Claim Workbook
+      description: Expense claim workbooks this agent produced.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types: [application/vnd.openxmlformats-officedocument.spreadsheetml.sheet]
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: claims
+    name: Claims
+    description: Claims, their checks, their workbook and their status.
+    resources:
+      data:  [claim, receipt, rule]
+      files: [workbook]
+    functions:
+      - id: list
+        name: List Claims
+        description: >
+          The person's claims, each with its claim_ref —
+          how a claim that already exists is found before it is read,
+          checked or turned into a workbook.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {claim: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            status: {type: string, enum: [draft, submitted, approved, rejected, paid]}
+        outputs:
+          type: object
+          required: [claims]
+          properties:
+            claims:
+              type: array
+              items:
+                type: object
+                properties:
+                  claim_ref: {type: string, x-resource: {type: data, id: claim}}
+                  title:     {type: string}
+                  claimant:  {type: string}
+                  status:    {type: string}
+                  currency:  {type: string}
+                  note:      {type: string}
+
+      - id: create
+        name: Create Claim
+        description: A new claim in draft for a claimant, in USD unless said otherwise.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {claim: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [title, claimant]
+          properties:
+            title:    {type: string, minLength: 1, maxLength: 200}
+            claimant: {type: string, minLength: 1, maxLength: 120}
+            currency: {type: string, minLength: 3, maxLength: 3, default: USD}
+        outputs:
+          type: object
+          required: [claim_ref, status]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+            status:    {type: string}
+
+      - id: get
+        name: Get Claim
+        description: The claim with its receipts and totals by currency.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {claim: [read], receipt: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [claim_ref]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+        outputs:
+          type: object
+          required: [claim_ref, title, claimant, status, currency, receipts, totals, needs_attention]
+          properties:
+            claim_ref:  {type: string}
+            title:      {type: string}
+            claimant:   {type: string}
+            status:     {type: string}
+            currency:   {type: string}
+            decided_by: {type: string}
+            decided_on: {type: string}
+            needs_attention: {type: integer}
+            totals:
+              type: array
+              items:
+                type: object
+                properties:
+                  currency: {type: string}
+                  amount:   {type: number}
+                  receipts: {type: integer}
+            receipts:
+              type: array
+              items:
+                type: object
+                properties:
+                  receipt_ref: {type: string, x-resource: {type: data, id: receipt}}
+                  file_ref:    {type: string}
+                  filename:    {type: string}
+                  merchant:    {type: string}
+                  date:        {type: string}
+                  currency:    {type: string}
+                  amount:      {type: number}
+                  category:    {type: string}
+                  status:      {type: string}
+                  verified:    {type: string}
+                  assumed:     {type: string}
+                  duplicate_of: {type: string}
+                  note:        {type: string}
+
+      - id: check
+        name: Check Claim
+        description: >
+          Duplicates (same merchant, date and amount, in this claim or
+          any other), receipts needing review or manual entry, receipts
+          in another currency, and policy exceptions from the loaded
+          rules (meal allowance per day, hotel per night, taxi per trip,
+          receipt required above an amount, claim window). Deterministic.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          data: {claim: [read], receipt: [list, update], rule: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [claim_ref]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+            as_of:     {type: string, maxLength: 10}
+        outputs:
+          type: object
+          required: [claim_ref, receipts, ok, exceptions, rules_applied]
+          properties:
+            claim_ref:     {type: string}
+            receipts:      {type: integer}
+            ok:            {type: integer}
+            rules_applied: {type: array, items: {type: string}}
+            exceptions:
+              type: array
+              items:
+                type: object
+                properties:
+                  receipt_ref: {type: string, x-resource: {type: data, id: receipt}}
+                  filename:    {type: string}
+                  kind:        {type: string}
+                  detail:      {type: string}
+
+      - id: workbook
+        name: Claim Workbook
+        description: >
+          The claim as an Excel file: Receipts (every field, status,
+          what was verified and assumed, the file ref), Summary by
+          category and currency, Exceptions, Rules applied. Read back
+          before it is returned.
+        permission_level: 2
+        timeout_seconds: 60
+        resources:
+          data:  {claim: [read], receipt: [list], rule: [list]}
+          files: {workbook: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [claim_ref]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+            as_of:     {type: string, maxLength: 10}
+        outputs:
+          type: object
+          required: [file_ref, filename, receipts, exceptions, verified]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: workbook}}
+            filename:   {type: string}
+            receipts:   {type: integer}
+            exceptions: {type: integer}
+            verified:   {type: boolean}
+
+      - id: set_status
+        name: Set Claim Status
+        description: >
+          Move a claim: draft → submitted on the claimant's word;
+          submitted → approved or rejected, and approved → paid, only
+          with the reviewer's name in "by". A claim with receipts still
+          needing review cannot be submitted.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {claim: [read, update], receipt: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [claim_ref, status]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+            status:    {type: string, enum: [submitted, approved, rejected, paid]}
+            by:        {type: string, maxLength: 120}
+            on_date:   {type: string, maxLength: 10}
+            note:      {type: string, maxLength: 300}
+        outputs:
+          type: object
+          required: [claim_ref, status]
+          properties:
+            claim_ref:  {type: string, x-resource: {type: data, id: claim}}
+            status:     {type: string}
+            decided_by: {type: string}
+            decided_on: {type: string}
+
+  - id: receipts
+    name: Receipts
+    description: Reads and confirms receipts.
+    resources:
+      data:  [claim, receipt]
+      files: [receipt_file]
+    functions:
+      - id: read
+        name: Read Receipt
+        description: >
+          One receipt file into the claim. With the chat's model it
+          extracts merchant, date, currency, amount and a category, then
+          verifies each against the receipt's text: the amount must
+          appear on the receipt, the date must parse, the currency must
+          be shown. What is verified and what is assumed are listed;
+          anything unverified marks the receipt needs_review. A photo
+          (jpeg/png) has no text here: recorded as manual, file kept,
+          for receipts.confirm to fill.
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data:  {claim: [read], receipt: [list, create]}
+          files: {receipt_file: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [claim_ref, file_ref]
+          properties:
+            claim_ref: {type: string, x-resource: {type: data, id: claim}}
+            file_ref:  {type: string, x-resource: {type: file, id: receipt_file}}
+        outputs:
+          type: object
+          required: [receipt_ref, status, category, verified, assumed]
+          properties:
+            receipt_ref: {type: string, x-resource: {type: data, id: receipt}}
+            status:      {type: string}
+            merchant:    {type: string}
+            date:        {type: string}
+            currency:    {type: string}
+            amount:      {type: number}
+            category:    {type: string}
+            verified:    {type: array, items: {type: string}}
+            assumed:     {type: array, items: {type: string}}
+            duplicate_of: {type: string}
+            note:        {type: string}
+
+      - id: confirm
+        name: Confirm Receipt
+        description: >
+          A person confirms or corrects a receipt's fields; the receipt
+          becomes confirmed. Required for manual (photo) receipts and
+          any receipt needing review.
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {receipt: [read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [receipt_ref]
+          properties:
+            receipt_ref: {type: string, x-resource: {type: data, id: receipt}}
+            merchant: {type: string, maxLength: 120}
+            date:     {type: string, maxLength: 10}
+            currency: {type: string, minLength: 3, maxLength: 3}
+            amount:   {type: number, minimum: 0}
+            category: {type: string, enum: [meals, travel, accommodation, transport, office, other]}
+            note:     {type: string, maxLength: 300}
+        outputs:
+          type: object
+          required: [receipt_ref, status]
+          properties:
+            receipt_ref: {type: string, x-resource: {type: data, id: receipt}}
+            status:      {type: string}
+            merchant:    {type: string}
+            date:        {type: string}
+            currency:    {type: string}
+            amount:      {type: number}
+            category:    {type: string}
+
+  - id: policies
+    name: Policy
+    description: The expense policy as rules with quoted sources.
+    resources:
+      data:  [rule]
+      files: [policy_file]
+    functions:
+      - id: load
+        name: Load Policy
+        description: >
+          Read the policy document with the chat's model for the known
+          rules — meal_max_per_day, hotel_max_per_night,
+          taxi_max_per_trip, receipt_required_above, claim_within_days,
+          alcohol_allowed — each with the sentence that states it,
+          checked against the text. Rules the policy does not state are
+          reported as not found, never assumed. Replaces earlier rules of
+          the same name.
+        permission_level: 1
+        timeout_seconds: 120
+        llm: true
+        resources:
+          data:  {rule: [list, create, update]}
+          files: {policy_file: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: policy_file}}
+        outputs:
+          type: object
+          required: [rules, not_found, unverified]
+          properties:
+            rules:
+              type: array
+              items:
+                type: object
+                properties:
+                  rule_ref: {type: string, x-resource: {type: data, id: rule}}
+                  name:     {type: string}
+                  value:    {type: string}
+                  quote:    {type: string}
+                  verified: {type: boolean}
+            not_found:  {type: array, items: {type: string}}
+            unverified: {type: array, items: {type: string}}
+
+      - id: set_rule
+        name: Set Rule
+        description: One rule set or corrected by a person (value as text, e.g. "60").
+        permission_level: 1
+        timeout_seconds: 15
+        resources:
+          data: {rule: [list, create, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name, value]
+          properties:
+            name:  {type: string, enum: [meal_max_per_day, hotel_max_per_night, receipt_required_above, taxi_max_per_trip, claim_within_days, alcohol_allowed]}
+            value: {type: string, minLength: 1, maxLength: 60}
+        outputs:
+          type: object
+          required: [rule_ref, name, value]
+          properties:
+            rule_ref: {type: string, x-resource: {type: data, id: rule}}
+            name:     {type: string}
+            value:    {type: string}
+
+      - id: get
+        name: Get Rules
+        description: The rules in force, with their sources.
+        permission_level: 0
+        timeout_seconds: 15
+        resources:
+          data: {rule: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [rules]
+          properties:
+            rules:
+              type: array
+              items:
+                type: object
+                properties:
+                  rule_ref: {type: string, x-resource: {type: data, id: rule}}
+                  name:     {type: string}
+                  value:    {type: string}
+                  quote:    {type: string}

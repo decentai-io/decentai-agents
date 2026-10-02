@@ -1,0 +1,173 @@
+# Sample data: what Sidra's last two meetings left to do — one task
+# overdue, one blocked, one done, one open, two proposals waiting — and
+# three things that renew on their own: a lease whose notice deadline
+# is in December, a subscription due soon, and a printer contract whose
+# notice day has already passed.
+story: Sidra Office Supplies — what the meetings left to do, and what renews before anyone decides.
+
+records:
+  - slot: task
+    fields:
+      title: Chase Northlight about the 15-day delivery
+      owner: Omar
+      due: "2026-09-04"
+      status: open
+      source: Ops meeting, 31 August 2026
+      note: Their quotation Q-2041 says 15 working days; Harbourline needs the chairs before the carpet.
+  - slot: task
+    fields:
+      title: Send Dana the quotation
+      owner: Lina
+      due: "2026-09-11"
+      status: open
+      source: Ops meeting, 7 September 2026
+  - slot: task
+    fields:
+      title: Send September statements to customers with balances
+      owner: Priya
+      due: "2026-09-09"
+      status: blocked
+      blocker: The Cloudledger export fails on invoices with part payments.
+      source: Ops meeting, 7 September 2026
+  - slot: task
+    fields:
+      title: Confirm the showroom slot with Harbourline
+      owner: Lina
+      due: "2026-09-03"
+      status: done
+      done_on: "2026-09-02"
+      evidence: Dana confirmed by email on 2 September.
+      source: Ops meeting, 31 August 2026
+  - slot: task
+    fields:
+      title: Update the supplier list before the audit
+      due: "2026-09-30"
+      status: open
+      source: Ops meeting, 7 September 2026
+      note: Nobody owns this yet.
+
+  - slot: extraction
+    fields:
+      title: Book the site visit once Dana has answered
+      kind: commitment
+      owner: Sami
+      due_text: once Dana has Harbourline's answer
+      quote: "Sami to book the site visit once Dana has Harbourline's answer."
+      source: Ops meeting, 7 September 2026
+      status: proposed
+  - slot: extraction
+    fields:
+      title: Review the chair warranty terms before the next order
+      kind: suggestion
+      quote: "We should probably review the chair warranty terms before the next order."
+      source: Ops meeting, 7 September 2026
+      status: proposed
+
+  - ref: lease
+    slot: agreement
+    fields:
+      name: Office lease — Riverside Business Park, unit 4B
+      counterparty: Riverside Estates
+      kind: lease
+      owner: Sami
+      reference: RBP-4B-2024
+      start_date: "2024-03-01"
+      renewal_date: "2027-03-01"
+      notice_days: 90
+      notice_basis: calendar
+      notice_deadline: "2026-12-01"
+      auto_renews: "yes"
+      value: 4000
+      currency: USD
+      status: active
+      decision: undecided
+      decision_by: "2026-11-15"
+      evidence: Lease clause 14.2, page 6
+      note: Monthly rent 4,000 USD; renews for a further three years unless notice is given.
+  - slot: clause
+    fields:
+      agreement_ref: "@lease"
+      topic: renewal
+      quote: "This Lease shall renew automatically for a further term of three (3) years on the Renewal Date unless either party gives written notice of non-renewal."
+      reference: Clause 14.1, page 6
+      reading: Renews for three years on 1 March 2027 unless notice is given.
+      ambiguous: "no"
+      verified: "yes"
+  - slot: clause
+    fields:
+      agreement_ref: "@lease"
+      topic: notice
+      quote: "Notice of non-renewal must be received by the Landlord not less than ninety (90) days before the Renewal Date."
+      reference: Clause 14.2, page 6
+      reading: Notice must reach the landlord by 1 December 2026.
+      ambiguous: "no"
+      verified: "yes"
+  - slot: deadline
+    fields: {agreement_ref: "@lease", kind: notice, title: "Give notice on the office lease, or let it renew", date: "2026-12-01", basis: calendar, owner: Sami, status: open, evidence: "Clause 14.2"}
+  - slot: deadline
+    fields: {agreement_ref: "@lease", kind: review, title: "Decide whether to stay at Riverside", date: "2026-11-15", basis: calendar, owner: Sami, status: open}
+
+  - ref: cloudledger
+    slot: agreement
+    fields:
+      name: Cloudledger accounting subscription
+      counterparty: Cloudledger
+      kind: subscription
+      owner: Priya
+      reference: CL-88213
+      start_date: "2025-11-15"
+      renewal_date: "2026-11-15"
+      notice_days: 30
+      notice_basis: calendar
+      notice_deadline: "2026-10-16"
+      auto_renews: "yes"
+      value: 1440
+      currency: USD
+      status: active
+      decision: renew
+      decision_by: "2026-10-10"
+      evidence: Terms of service, section 5
+      note: Annual plan, 120 USD a month billed yearly. Priya wants to ask about a multi-year price first.
+  - slot: clause
+    fields:
+      agreement_ref: "@cloudledger"
+      topic: auto_renewal
+      quote: "Your subscription renews automatically at the end of each term unless cancelled at least 30 days before the renewal date."
+      reference: Terms of service, section 5
+      reading: Cancel by 16 October 2026 or it renews for a year.
+      ambiguous: "no"
+      verified: "yes"
+  - slot: deadline
+    fields: {agreement_ref: "@cloudledger", kind: notice, title: "Cancel or keep Cloudledger", date: "2026-10-16", basis: calendar, owner: Priya, status: open, evidence: "Terms of service, section 5"}
+
+  - ref: printers
+    slot: agreement
+    fields:
+      name: Printer maintenance contract
+      counterparty: Pier 9 Supply
+      kind: maintenance
+      owner: Omar
+      reference: P9-MAINT-0311
+      start_date: "2025-10-01"
+      renewal_date: "2026-10-01"
+      notice_days: 60
+      notice_basis: calendar
+      notice_deadline: "2026-08-02"
+      auto_renews: "yes"
+      value: 900
+      currency: USD
+      status: active
+      decision: undecided
+      evidence: Contract clause 9
+      note: The printers it covers were replaced in July 2026. The notice deadline has already passed.
+  - slot: clause
+    fields:
+      agreement_ref: "@printers"
+      topic: notice
+      quote: "Either party may terminate at the end of the current term by giving sixty days' notice; absent notice the agreement continues for a further twelve months."
+      reference: Clause 9
+      reading: Notice was due by 2 August 2026.
+      ambiguous: "no"
+      verified: "yes"
+  - slot: deadline
+    fields: {agreement_ref: "@printers", kind: notice, title: "Notice on the printer maintenance contract", date: "2026-08-02", basis: calendar, owner: Omar, status: open, evidence: "Clause 9"}

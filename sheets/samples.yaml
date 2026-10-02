@@ -1,0 +1,12 @@
+# Sample data: a supplier price list with the faults the example prompts
+# ask about — a duplicated row, a missing price, a price that is not a
+# number — and a second list to reconcile it against.
+story: Sidra Office Supplies — a price list with faults, and the catalog to reconcile it with.
+
+files:
+  - ref: prices
+    slot: source
+    path: samples/supplier-price-list.csv
+  - ref: catalog
+    slot: source
+    path: samples/product-catalog.csv

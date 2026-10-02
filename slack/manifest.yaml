@@ -1,0 +1,471 @@
+# The Slack agent — one person's Slack, read and answered as that
+# person, through the platform's gates over the Slack Web API.
+#
+# The Microsoft Teams agent's twin: list the conversations the person is
+# in, read one, read a thread, search, and say whether anyone answered
+# a message; sending as the person is a level-3 action that waits for
+# the user, and what was sent is kept. A watch over mentions and direct
+# messages lets a schedule wake the assistant only when something new
+# arrived. It signs in with a Slack USER token, so it sees exactly what
+# the person sees and says things in their name.
+
+schema_version: "1.0"
+
+agent:
+  id: slack
+  name: Slack
+  version: "0.1.2"
+  description: >
+    Your Slack through the assistant. Catch up on a channel, a thread
+    or a direct message, find what was said, see whether someone
+    answered, and send a message as you on your go-ahead. A watch on
+    your mentions and direct messages wakes the assistant only when
+    something new arrived.
+  tags:
+    - chat
+    - slack
+    - productivity
+  examples:
+    - title: "Catch up"
+      prompt: "What was said in #showroom on Slack this morning?"
+    - title: "Did they answer"
+      prompt: "Has anyone answered my question about the chair delivery on Slack?"
+    - title: "Answer it"
+      prompt: "Reply in that Slack thread that the drawings are coming Thursday, and show me the text first."
+    - title: "Watch for me"
+      prompt: "Watch my Slack mentions and direct messages and tell me whenever something needs an answer."
+  instructions: >
+    Use this agent for Slack. Conversations (channels, private channels,
+    group DMs and DMs) are addressed by conversation_id; find one with
+    conversations.list or messages.search, never invent one. Messages
+    are addressed by their ts, Slack's own id such as
+    1712345678.123456; pass every ts and id on exactly as returned.
+    conversations.messages reads recent messages oldest first;
+    conversations.replies reads a thread by its thread_ts. messages.search
+    takes Slack's search syntax (in:#channel, from:@name, before:,
+    after:, on:YYYY-MM-DD) and returns newest first. messages.answered
+    says whether anyone other than the person replied after a message.
+    messages.send posts AS THE PERSON and leaves the platform: show the
+    exact text and where it goes, and send only on their go-ahead. If a
+    send comes back with an unknown outcome, read the conversation
+    before trying again. To act on mentions and direct messages as they
+    arrive, record a watch ONCE (watch.start) and schedule watch.new
+    with wake_field "messages" every few minutes; each wake carries only
+    what arrived since the last check. Never record a second watch for
+    the same request.
+
+implementation:
+  entrypoint: agent:SlackAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - slack.com
+
+resources:
+  secrets:
+    - id: slack
+      label: Slack Account
+      description: >
+        A Slack account, connected by signing in, acting as the person
+        (a user token). api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: slack
+        authorize_url: https://slack.com/oauth/v2/authorize
+        token_url: https://slack.com/api/oauth.v2.access
+        # A user token: Slack takes user scopes under user_scope, joined
+        # with commas, and returns the token inside authed_user.
+        scope_param: user_scope
+        scope_separator: ","
+        token_path: authed_user
+        scopes:
+          - channels:read
+          - channels:history
+          - groups:read
+          - groups:history
+          - im:read
+          - im:history
+          - mpim:read
+          - mpim:history
+          - users:read
+          - users:read.email
+          - search:read
+          - chat:write
+        identity: {url: https://slack.com/api/auth.test, field: user}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: sent
+      label: Sent Message
+      description: Every message this agent sent as the person, where, and the ts Slack gave it.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: conversation_id, label: Conversation ID, type: string, storage: keys, required: true}
+        - {name: conversation,    label: Conversation,    type: string, storage: keys, required: true}
+        - {name: thread_ts,       label: Thread,          type: string, storage: keys, required: false}
+        - {name: text,            label: Text,            type: string, storage: keys, required: true}
+        - {name: ts,              label: Message ts,      type: string, storage: keys, required: true}
+        - {name: sent_at,         label: Sent At,         type: string, storage: keys, required: true}
+        - {name: link,            label: Link,            type: string, storage: keys, required: false}
+
+    - id: watch
+      label: Mentions Watch
+      description: >
+        How far the person's mentions and direct messages have been read
+        on their behalf: the ts of the last message handed on, which of
+        the two are watched, and conversations left out.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: which,              label: Watching,          type: select, storage: keys, required: true, options: [mentions, dms, both]}
+        - {name: cursor,             label: Read Up To (ts),   type: string, storage: keys, required: true}
+        - {name: skip_conversations, label: Left Out,          type: string, storage: keys, required: false}
+        - {name: status,             label: Status,            type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,               label: Note,              type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Slack account.
+    resources:
+      secrets: [slack]
+    functions:
+      - id: status
+        name: Slack Status
+        description: Confirm the connection and say whose account and which workspace it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected]
+          properties:
+            connected: {type: boolean}
+            team:      {type: string}
+            user:      {type: string}
+            user_id:   {type: string}
+            problem:   {type: string}
+
+  - id: conversations
+    name: Conversations
+    description: The conversations the person is in, and what was said in them.
+    resources:
+      secrets: [slack]
+    functions:
+      - id: list
+        name: List Conversations
+        description: >
+          Channels, private channels, group DMs and DMs the person is in,
+          each with its kind and a name (a DM by the other person, a
+          group DM by everyone else in it). kind narrows to one of
+          channel, private_channel, group_dm or dm.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            kind:        {type: string, enum: [channel, private_channel, group_dm, dm]}
+            max_results: {type: integer, minimum: 1, maximum: 100, default: 50}
+        outputs:
+          type: object
+          required: [conversations, more]
+          properties:
+            more: {type: boolean}
+            conversations:
+              type: array
+              items:
+                type: object
+                properties:
+                  conversation_id: {type: string}
+                  kind:            {type: string}
+                  name:            {type: string}
+
+      - id: messages
+        name: Read Conversation
+        description: >
+          A conversation's most recent messages, oldest first, with
+          author names, text, ts, reply counts and links. oldest and
+          latest (Slack ts values) bound the window; more says there is
+          earlier history.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [conversation_id]
+          properties:
+            conversation_id: {type: string, minLength: 1, maxLength: 40}
+            oldest:          {type: string, maxLength: 20}
+            latest:          {type: string, maxLength: 20}
+            max_results:     {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [conversation_id, messages, more]
+          properties:
+            conversation_id: {type: string}
+            name:            {type: string}
+            more:            {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  ts:          {type: string}
+                  thread_ts:   {type: string}
+                  sent:        {type: string}
+                  author:      {type: string}
+                  author_id:   {type: string}
+                  mine:        {type: boolean}
+                  text:        {type: string}
+                  reply_count: {type: integer}
+                  link:        {type: string}
+
+      - id: replies
+        name: Read Thread
+        description: >
+          A thread's parent and replies, oldest first, by the thread's
+          thread_ts (the parent message's ts).
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [conversation_id, thread_ts]
+          properties:
+            conversation_id: {type: string, minLength: 1, maxLength: 40}
+            thread_ts:       {type: string, minLength: 1, maxLength: 20}
+            max_results:     {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [conversation_id, thread_ts, messages, more]
+          properties:
+            conversation_id: {type: string}
+            thread_ts:       {type: string}
+            more:            {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  ts:          {type: string}
+                  thread_ts:   {type: string}
+                  sent:        {type: string}
+                  author:      {type: string}
+                  author_id:   {type: string}
+                  mine:        {type: boolean}
+                  text:        {type: string}
+                  reply_count: {type: integer}
+                  link:        {type: string}
+
+  - id: messages
+    name: Messages
+    description: Finds messages and whether anyone answered; sends only on authorization.
+    resources:
+      secrets: [slack]
+      data:    [sent]
+    functions:
+      - id: search
+        name: Search Messages
+        description: >
+          Messages matching a Slack search query (plain words, in:#channel,
+          from:@name, before:, after:, on:YYYY-MM-DD), newest first, each
+          with where it was said and a link.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query:       {type: string, minLength: 1, maxLength: 500}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [messages, total, more]
+          properties:
+            total: {type: integer}
+            more:  {type: boolean}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  conversation_id: {type: string}
+                  conversation:    {type: string}
+                  kind:            {type: string}
+                  ts:              {type: string}
+                  thread_ts:       {type: string}
+                  sent:            {type: string}
+                  author:          {type: string}
+                  author_id:       {type: string}
+                  text:            {type: string}
+                  link:            {type: string}
+
+      - id: answered
+        name: Was It Answered
+        description: >
+          Whether anyone other than the person wrote after a message
+          (conversation_id and its ts) — in its thread or in the
+          conversation — and who, with what they said.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {slack: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [conversation_id, ts]
+          properties:
+            conversation_id: {type: string, minLength: 1, maxLength: 40}
+            ts:              {type: string, minLength: 1, maxLength: 20}
+        outputs:
+          type: object
+          required: [answered, by, replies, more]
+          properties:
+            answered: {type: boolean}
+            more:     {type: boolean}
+            by:       {type: array, items: {type: string}}
+            replies:
+              type: array
+              items:
+                type: object
+                properties:
+                  where:     {type: string}
+                  ts:        {type: string}
+                  thread_ts: {type: string}
+                  sent:      {type: string}
+                  author:    {type: string}
+                  author_id: {type: string}
+                  mine:      {type: boolean}
+                  text:      {type: string}
+                  reply_count: {type: integer}
+                  link:      {type: string}
+
+      - id: send
+        name: Send Message
+        description: >
+          Post text as the person to a conversation, or into a thread
+          with thread_ts. It leaves the platform in the person's name —
+          only on their go-ahead, with the exact text they saw.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {slack: use}
+          data:    {sent: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [conversation_id, text]
+          properties:
+            conversation_id: {type: string, minLength: 1, maxLength: 40}
+            text:            {type: string, minLength: 1, maxLength: 4000}
+            thread_ts:       {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [sent_ref, conversation_id, ts]
+          properties:
+            sent_ref:        {type: string, x-resource: {type: data, id: sent}}
+            conversation_id: {type: string}
+            ts:              {type: string}
+            thread_ts:       {type: string}
+            link:            {type: string}
+
+  - id: watch
+    name: Watch
+    description: Mentions and direct messages, checked on a clock.
+    resources:
+      secrets: [slack]
+      data:    [watch]
+    functions:
+      - id: start
+        name: Watch Mentions and DMs
+        description: >
+          Start watching, from now, for messages that mention the person
+          and new direct and group-direct messages (which is mentions,
+          dms or both). skip_conversations takes conversation ids to
+          leave out, comma-separated. Record it once, then schedule
+          watch.new.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {slack: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            which:              {type: string, enum: [mentions, dms, both], default: both}
+            skip_conversations: {type: string, maxLength: 1000}
+            note:               {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, which, cursor]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+            which:     {type: string}
+            cursor:    {type: string}
+            since:     {type: string}
+            user:      {type: string}
+
+      - id: new
+        name: New Mentions and DMs
+        description: >
+          What arrived since the last check, for every watch (or one, by
+          watch_ref): one row per message, oldest first, kind mention or
+          dm, the person's own messages left out. Moves the watch
+          forward; more says a later check continues; unchecked counts
+          DM conversations beyond this check's limit. Schedule it with
+          wake_field "messages" to be woken only when something arrived.
+        permission_level: 1
+        timeout_seconds: 120
+        schedulable: true
+        resources:
+          secrets: {slack: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, messages, more, unchecked]
+          properties:
+            checked:   {type: integer}
+            more:      {type: boolean}
+            unchecked: {type: integer}
+            messages:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:       {type: string, x-resource: {type: data, id: watch}}
+                  kind:            {type: string}
+                  conversation_id: {type: string}
+                  conversation:    {type: string}
+                  ts:              {type: string}
+                  thread_ts:       {type: string}
+                  sent:            {type: string}
+                  author:          {type: string}
+                  author_id:       {type: string}
+                  text:            {type: string}
+                  link:            {type: string}

@@ -1,0 +1,124 @@
+# The Connection Check agent — what the platform lets an agent reach,
+# tried from where an agent runs.
+#
+# An agent declares the hosts it connects to, and where the platform
+# confines agents a host that was not declared is refused. This agent
+# is how a person sees that for themselves: it declares ONE host, tries
+# that host, a host it never declared, an address inside the network
+# and a connection made past the platform's proxy, and says what
+# happened to each. Nothing is sent to any of them and nothing is read
+# from them: an attempt is a connection opened and closed.
+
+schema_version: "1.0"
+
+agent:
+  id: connection_check
+  name: Connection Check
+  version: "0.1.2"
+  description: >
+    See what an agent can reach from where it runs. It declares one
+    host, tries that one, one it never declared, an address inside the
+    network and a way around the platform, and says which were reached
+    and which were refused, and by what.
+  tags:
+    - diagnostics
+    - security
+  examples:
+    - title: "Check this install"
+      prompt: "Run the connection check and tell me what was reached and what was refused."
+    - title: "Try one address"
+      prompt: "Ask Connection Check whether it can reach api.github.com, and why."
+    - title: "Try the host it declared"
+      prompt: "Ask Connection Check to reach example.com."
+  instructions: >
+    Use this agent when the person wants to see whether agents are held
+    to the hosts they declared. check.report runs the whole check and
+    is the place to start; check.reach tries one address the person
+    names. Report every row as the result gives it: outcome is reached,
+    refused, unreachable or not_tried, and they are different things.
+    refused means the platform stopped it, and reason says why in the
+    platform's own words; unreachable means it was allowed and the host
+    did not answer; not_tried means this agent would not try it. Never
+    say an attempt was refused when its outcome is unreachable, and
+    never guess a reason the result does not give. This agent declares
+    example.com and nothing else, so example.com reached and everything
+    else refused is what a held agent looks like: say so plainly, and
+    say as plainly when the verdict is that nothing holds it. It sends
+    nothing to the hosts it tries and reads nothing from them.
+
+implementation:
+  entrypoint: agent:ConnectionCheckAgent
+  dependencies: []
+
+# Where it connects, and the whole of it: the one host the check is
+# measured against. Everything else it tries is meant to be refused.
+network:
+  hosts:
+    - example.com
+
+tools:
+  - id: check
+    name: Check
+    description: Tries connections from where this agent runs, and says what happened.
+    functions:
+      - id: report
+        name: Run The Check
+        description: >
+          The whole check: the host this agent declared, a host it did
+          not declare, an address inside the network, and a connection
+          and a name lookup made past the platform's proxy. Each row
+          says what was expected of a held agent and what happened;
+          held says whether every row went as expected.
+        permission_level: 0
+        timeout_seconds: 90
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [held, verdict, through_the_proxy, rows]
+          properties:
+            held:              {type: boolean}
+            verdict:           {type: string}
+            through_the_proxy: {type: boolean}
+            runs_as:           {type: string}
+            rows:
+              type: array
+              items:
+                type: object
+                required: [attempt, target, expected, outcome, as_expected]
+                properties:
+                  attempt:     {type: string}
+                  target:      {type: string}
+                  expected:    {type: string}
+                  outcome:     {type: string, enum: [reached, refused, unreachable, not_tried]}
+                  reason:      {type: string}
+                  as_expected: {type: boolean}
+
+      - id: reach
+        name: Try One Address
+        description: >
+          Try one host the person names: a name such as api.github.com,
+          with a port when it is not 443 (host:8443), or a whole
+          address (https://host/path, of which the host and the port
+          are used). Says whether this agent declared it, what
+          happened, and the platform's reason when it was refused.
+        permission_level: 0
+        timeout_seconds: 45
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [address]
+          properties:
+            address: {type: string, minLength: 1, maxLength: 300}
+        outputs:
+          type: object
+          required: [host, port, declared, outcome, through_the_proxy]
+          properties:
+            host:              {type: string}
+            port:              {type: integer}
+            declared:          {type: boolean}
+            outcome:           {type: string, enum: [reached, refused, unreachable, not_tried]}
+            reason:            {type: string}
+            through_the_proxy: {type: boolean}

@@ -1,0 +1,308 @@
+# The Microsoft Forms agent — a form's responses, read from the Excel
+# workbook they sync to, over Microsoft Graph's workbook API.
+#
+# Microsoft Forms has NO supported Graph API for forms or responses,
+# and this agent calls no undocumented Forms endpoint. What Graph does
+# serve is Excel: a form created from Excel for the web, or from
+# OneDrive for Business, keeps its responses in a workbook whose table
+# gains a row per response. This agent finds such workbooks, lists
+# their responses keyed by question, and watches one so a schedule
+# wakes the assistant only when a response arrived. A personal form's
+# "Open in Excel" download is a one-off copy that never updates, and a
+# form with no linked workbook cannot be read here at all.
+#
+# It reads and records watches; it changes nothing in Forms or Excel.
+
+schema_version: "1.0"
+
+agent:
+  id: microsoft_forms
+  name: Microsoft Forms
+  version: "0.1.2"
+  description: >
+    Responses to your Microsoft Forms, read from the Excel workbook
+    they sync to in OneDrive, and a watch that wakes the assistant
+    only when a new response arrives. Only forms whose responses are
+    kept in an Excel workbook in your OneDrive or SharePoint can be
+    read; Microsoft offers no other way in.
+  tags:
+    - forms
+    - surveys
+    - microsoft
+    - productivity
+  examples:
+    - title: "Latest responses"
+      prompt: "Show me the five latest responses to the Sidra customer feedback form."
+    - title: "Find the response workbook"
+      prompt: "Which of my Excel workbooks hold Microsoft Forms responses?"
+    - title: "Watch for responses"
+      prompt: "Watch the event registration form and, whenever someone signs up, tell me their name and which session they picked."
+  instructions: >
+    Use this agent to read responses to a Microsoft Form. Microsoft
+    Forms has no API: this agent can only read a form whose responses
+    sync live to an Excel workbook in the user's OneDrive or SharePoint
+    (a form created from Excel for the web or from OneDrive for
+    Business). Say so plainly when the user's form is not kept that way;
+    a personal form's "Open in Excel" download is a one-off copy and
+    will not show new responses. Find the workbook first (forms.find)
+    and take its workbook_id from a row with is_response_workbook true;
+    never invent an id or a table name. responses.list shows the latest
+    responses, newest first, each with its answers keyed by the question
+    as the form asked it. To act on responses as they arrive, record a
+    watch ONCE (responses.watch) and schedule responses.new with
+    wake_field "responses"; each wake carries only the responses
+    submitted since the last check, oldest first, each naming its watch.
+    Never record a second watch for the same request. Respondents'
+    names and emails are personal data: use them for what the user
+    asked, and do not repeat them elsewhere.
+
+implementation:
+  entrypoint: agent:MicrosoftFormsAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - graph.microsoft.com
+
+resources:
+  secrets:
+    - id: microsoft
+      label: Microsoft Account
+      description: >
+        A Microsoft 365 account, connected by signing in — the same
+        connection the other Microsoft agents use; grant one saved
+        account to all of them. The platform keeps and refreshes the
+        tokens; this agent receives a short-lived access token.
+        api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: microsoft
+        authorize_url: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+        token_url: https://login.microsoftonline.com/common/oauth2/v2.0/token
+        scopes:
+          - openid
+          - email
+          - offline_access
+          - User.Read
+          - Mail.ReadWrite
+          - Mail.Send
+          - Calendars.ReadWrite
+          - Files.ReadWrite.All
+          - Chat.ReadWrite
+          - Team.ReadBasic.All
+          - Channel.ReadBasic.All
+          - ChannelMessage.Send
+          - Tasks.ReadWrite
+        identity: {url: https://graph.microsoft.com/v1.0/me, field: userPrincipalName}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: watch
+      label: Response Watch
+      description: >
+        A form's response workbook the user wants to hear about as
+        responses arrive: the highest response ID handed on, and how
+        many rows the table held then.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: workbook_id, label: Workbook ID,        type: string, storage: keys, required: true}
+        - {name: workbook,    label: Workbook,           type: string, storage: keys, required: true}
+        - {name: table,       label: Table,              type: string, storage: keys, required: true}
+        - {name: last_id,     label: Last Response ID,   type: number, storage: keys, required: true}
+        - {name: row_count,   label: Rows Then,          type: number, storage: keys, required: true}
+        - {name: status,      label: Status,             type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,        label: Note,               type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Microsoft 365 account.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Microsoft connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: forms
+    name: Forms
+    description: Finds the Excel workbooks that hold a form's responses.
+    resources:
+      secrets: [microsoft]
+    functions:
+      - id: find
+        name: Find Response Workbooks
+        description: >
+          Excel workbooks (.xlsx) in the drive matching query (every
+          workbook when left out), each opened to see whether it holds
+          a Forms response table — one with ID, Start time, Completion
+          time, Email and Name columns. Matches come first, with the
+          table, its questions and how many responses it holds.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            query:       {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+        outputs:
+          type: object
+          required: [workbooks, more]
+          properties:
+            more: {type: boolean}
+            workbooks:
+              type: array
+              items:
+                type: object
+                properties:
+                  item_id:              {type: string}
+                  name:                 {type: string}
+                  folder:               {type: string}
+                  modified:             {type: string}
+                  size:                 {type: integer}
+                  link:                 {type: string}
+                  is_response_workbook: {type: boolean}
+                  table:                {type: string}
+                  questions:            {type: array, items: {type: string}}
+                  responses:            {type: integer}
+                  problem:              {type: string}
+
+  - id: responses
+    name: Responses
+    description: >
+      Lists a form's responses from its workbook, and remembers how far
+      they have been read so only new ones are handed on.
+    resources:
+      secrets: [microsoft]
+      data:    [watch]
+    functions:
+      - id: list
+        name: Latest Responses
+        description: >
+          The latest responses in a response workbook, newest first, each
+          with its ID, start and completion times, respondent email and
+          name (empty for an anonymous form) and answers keyed by
+          question. table is needed only when the workbook holds more
+          than one response table.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [workbook_id]
+          properties:
+            workbook_id: {type: string, minLength: 1, maxLength: 200}
+            table:       {type: string, maxLength: 100}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+        outputs:
+          type: object
+          required: [table, total, responses]
+          properties:
+            table: {type: string}
+            total: {type: integer}
+            responses:
+              type: array
+              items: &response
+                type: object
+                properties:
+                  response_id:     {type: integer}
+                  start_time:      {type: string}
+                  completion_time: {type: string}
+                  email:           {type: string}
+                  name:            {type: string}
+                  answers:         {type: object}
+                  row_number:      {type: integer}
+
+      - id: watch
+        name: Watch For Responses
+        description: >
+          Start watching a response workbook for responses submitted from
+          now on. Record it once, then schedule responses.new.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [workbook_id]
+          properties:
+            workbook_id: {type: string, minLength: 1, maxLength: 200}
+            table:       {type: string, maxLength: 100}
+            note:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, workbook, table, last_id, responses]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+            workbook:  {type: string}
+            table:     {type: string}
+            last_id:   {type: integer}
+            responses: {type: integer}
+
+      - id: new
+        name: New Responses
+        description: >
+          Responses submitted since the last check, for every response
+          watch (or one, by watch_ref): oldest first, shaped like
+          responses.list, each naming its watch. Moves the watch forward;
+          "more" says a later check continues. Schedule it with
+          wake_field "responses" to be woken only when a response arrived.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {microsoft: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, responses, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            responses:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:       {type: string, x-resource: {type: data, id: watch}}
+                  workbook:        {type: string}
+                  table:           {type: string}
+                  response_id:     {type: integer}
+                  start_time:      {type: string}
+                  completion_time: {type: string}
+                  email:           {type: string}
+                  name:            {type: string}
+                  answers:         {type: object}
+                  row_number:      {type: integer}

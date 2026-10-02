@@ -1,0 +1,329 @@
+# The Google Forms agent — Google Forms and their responses, read and
+# watched through the platform's gates, over the Forms API (v1).
+#
+# It finds a form through Drive, says what it asks, lists its responses
+# keyed by question title, and watches a form for responses submitted
+# since the last look, so a schedule wakes the assistant only when
+# someone answered. It changes nothing in Google: there is no function
+# here that edits a form or a response, and the scopes it asks for Forms
+# are read-only.
+
+schema_version: "1.0"
+
+agent:
+  id: google_forms
+  name: Google Forms
+  version: "0.1.2"
+  description: >
+    Your Google Forms, through the assistant. See what a form asks, read
+    its responses, and hear about new ones as they come in.
+  tags:
+    - forms
+    - surveys
+    - google
+    - productivity
+  examples:
+    - title: "Read the responses"
+      prompt: "Show me the latest responses to the Sidra customer feedback form."
+    - title: "What does it ask"
+      prompt: "What questions are on the workshop registration form, and which are required?"
+    - title: "Hear about new responses"
+      prompt: "Every hour, tell me about new responses to the office move survey."
+  instructions: >
+    Use this agent to read Google Forms and their responses. Forms are
+    addressed by form_id: take it from forms.find, never invent one.
+    forms.get shows the questions; responses.list shows responses newest
+    first, each keyed by question title, ten at a time — use
+    next_page_token for more rather than guessing at the rest. Uploaded
+    files are named in the answer, not fetched. To hear about new
+    responses, record responses.watch once, then schedule responses.new
+    with wake_field "responses". A response edited after it was handed on
+    comes again with its new time. When a form is linked to a response
+    spreadsheet (linked_sheet_id), the Google Sheets agent can read or
+    watch that sheet instead. This agent never changes a form.
+
+implementation:
+  entrypoint: agent:GoogleFormsAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - forms.googleapis.com
+    - www.googleapis.com
+
+resources:
+  secrets:
+    - id: google
+      label: Google Account
+      description: >
+        A Google account, connected by signing in — the same connection
+        every Google agent uses; grant one saved account to all of them.
+        The platform keeps and refreshes the tokens; this agent receives
+        a short-lived access token. api_base_url is for tests only; leave
+        it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: google
+        authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+        token_url: https://oauth2.googleapis.com/token
+        scopes:
+          - openid
+          - https://www.googleapis.com/auth/userinfo.email
+          - https://www.googleapis.com/auth/gmail.modify
+          - https://www.googleapis.com/auth/calendar
+          - https://www.googleapis.com/auth/drive
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/forms.body.readonly
+          - https://www.googleapis.com/auth/forms.responses.readonly
+          - https://www.googleapis.com/auth/tasks
+        authorize_params: {access_type: offline, prompt: consent}
+        identity: {url: https://openidconnect.googleapis.com/v1/userinfo, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: watch
+      label: Responses Watch
+      description: >
+        How far a form's responses have been read on the user's behalf:
+        the submit time of the newest response handed on (Google's clock,
+        UTC), and the ids that sit exactly on that time.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: form_id,    label: Form ID,           type: string, storage: keys, required: true}
+        - {name: form,       label: Form,              type: string, storage: keys, required: true}
+        - {name: since,      label: Read Up To,        type: string, storage: keys, required: true}
+        - {name: cursor_ids, label: Ids At That Time,  type: string, storage: keys, required: false}
+        - {name: status,     label: Status,            type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,       label: Note,              type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Google account.
+    resources:
+      secrets: [google]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Google connection works and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: forms
+    name: Forms
+    description: Finds forms and shows what they ask.
+    resources:
+      secrets: [google]
+    functions:
+      - id: find
+        name: Find Forms
+        description: >
+          Forms whose name contains name (all of them when it is empty),
+          most recently changed first, with links. Use page_token to
+          continue.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            name:        {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:  {type: string, maxLength: 2000}
+        outputs:
+          type: object
+          required: [forms]
+          properties:
+            forms:
+              type: array
+              items:
+                type: object
+                properties:
+                  form_id:  {type: string}
+                  name:     {type: string}
+                  modified: {type: string}
+                  owner:    {type: string}
+                  link:     {type: string}
+            next_page_token: {type: string}
+
+      - id: get
+        name: Get Form
+        description: >
+          A form's title, description, the link people answer it at, the
+          response spreadsheet it is linked to if any, and its questions —
+          each with its id, title, kind, options and whether it is
+          required. A grid is one question per row.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [form_id]
+          properties:
+            form_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [form_id, title, description, responder_link, question_count, questions]
+          properties:
+            form_id:         {type: string}
+            title:           {type: string}
+            description:     {type: string}
+            responder_link:  {type: string}
+            linked_sheet_id: {type: string}
+            question_count:  {type: integer}
+            questions:
+              type: array
+              items:
+                type: object
+                properties:
+                  question_id: {type: string}
+                  title:       {type: string}
+                  kind:        {type: string}
+                  options:     {type: array, items: {type: string}}
+                  required:    {type: boolean}
+
+  - id: responses
+    name: Responses
+    description: >
+      Reads a form's responses, and remembers how far they have been read
+      to hand on what was submitted since.
+    resources:
+      secrets: [google]
+      data:    [watch]
+    functions:
+      - id: list
+        name: List Responses
+        description: >
+          A form's responses, newest first, each keyed by question title;
+          since (an ISO 8601 date-time) keeps only those submitted at or
+          after it. Long answers are clipped; uploaded files are named.
+          Use next_page_token to continue.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [form_id]
+          properties:
+            form_id:     {type: string, minLength: 1, maxLength: 200}
+            since:       {type: string, maxLength: 40}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+            page_token:  {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [form, total, cut_short, responses]
+          properties:
+            form:            {type: string}
+            total:           {type: integer}
+            cut_short:       {type: boolean}
+            next_page_token: {type: string}
+            responses:
+              type: array
+              items:
+                type: object
+                properties:
+                  response_id: {type: string}
+                  submitted:   {type: string}
+                  email:       {type: string}
+                  answers:     {type: object}
+
+      - id: watch
+        name: Watch A Form
+        description: >
+          Start watching a form for new responses, from now: the responses
+          already submitted are not news. Record it once, then schedule
+          responses.new.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [form_id]
+          properties:
+            form_id: {type: string, minLength: 1, maxLength: 200}
+            note:    {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, form, since, responses_so_far]
+          properties:
+            watch_ref:        {type: string, x-resource: {type: data, id: watch}}
+            form:             {type: string}
+            since:            {type: string}
+            responses_so_far: {type: integer}
+
+      - id: new
+        name: New Responses
+        description: >
+          Responses submitted since the last check, for every responses
+          watch (or one, by watch_ref), oldest first, shaped like
+          responses.list, each naming its watch. Moves the watch forward;
+          "more" says a later check continues. A form that can no longer
+          be opened is listed in closed and its watch stops. Schedule it
+          with wake_field "responses" to be woken only when someone
+          answered.
+        permission_level: 1
+        timeout_seconds: 90
+        schedulable: true
+        resources:
+          secrets: {google: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, responses, closed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            responses:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+                  form:        {type: string}
+                  response_id: {type: string}
+                  submitted:   {type: string}
+                  email:       {type: string}
+                  answers:     {type: object}
+            closed:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref: {type: string, x-resource: {type: data, id: watch}}
+                  form:      {type: string}
+                  message:   {type: string}

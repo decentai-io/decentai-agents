@@ -1,0 +1,18 @@
+# Sample data: the documents the example prompts name — an office lease
+# with a notice clause, two versions of a proposal, and an invoice — as
+# platform files the agent reads by file_ref.
+story: Sidra Office Supplies — a lease, a proposal in two versions, and an invoice to read.
+
+files:
+  - ref: lease
+    slot: source
+    path: samples/riverside-office-lease.pdf
+  - ref: proposal_v1
+    slot: source
+    path: samples/harbourline-proposal-v1.md
+  - ref: proposal_v2
+    slot: source
+    path: samples/harbourline-proposal-v2.md
+  - ref: invoice
+    slot: source
+    path: samples/invoice-INV-1043.pdf

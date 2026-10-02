@@ -1,0 +1,424 @@
+# The Google Calendar agent — one Google Calendar, read and written through
+# the platform's gates.
+#
+# Lists events, reports who is free and whose availability could not
+# be checked, finds candidate times deterministically (working hours,
+# business days, lunch and other avoid-windows, buffers between
+# meetings), and creates, updates or cancels events only as level-3
+# actions. Inviting someone is not their acceptance: events.get shows
+# each attendee's actual response.
+
+schema_version: "1.0"
+
+agent:
+  id: google_calendar
+  name: Google Calendar
+  version: "0.1.6"
+  description: >
+    Your Google Calendar, read and booked through the assistant. See
+    what is on, find times when everyone is free within the
+    constraints you state, and create, move or cancel events only on
+    your explicit go-ahead.
+  tags:
+    - calendar
+    - scheduling
+    - productivity
+  examples:
+    - title: "See the day"
+      prompt: "What is on my calendar tomorrow?"
+    - title: "Find a time"
+      prompt: "Find three one-hour slots next week when Dana and I are both free, afternoons only."
+    - title: "Book it"
+      prompt: "Book Thursday at 3pm with Dana, title \"Office furniture\", and invite her."
+  instructions: >
+    Use this agent to look at the calendar, find a time, or book, move
+    or cancel a meeting. Attendees are email addresses: resolve a
+    person's name to an address first (from a mail thread, or ask) and
+    never guess one. Dates are ISO 8601 in the calendar's time zone
+    unless the user says otherwise; when a date is ambiguous ("next
+    week", "Thursday") say which dates you took and confirm before
+    booking. events.find_times is deterministic and only proposes slots
+    free for every attendee whose calendar could be checked — it names
+    the attendees it could NOT check; do not present those as free.
+    Creating an event (events.create) is an external action that needs
+    the user's explicit go-ahead and may pause for approval; an
+    invitation sent is not an acceptance — use events.get to see who
+    has actually accepted. Event ids and links are Google's own.
+
+implementation:
+  entrypoint: agent:GoogleCalendarAgent
+  dependencies:
+    - requests>=2.31,<3
+    - tzdata>=2024.1
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - www.googleapis.com
+
+resources:
+  secrets:
+    - id: google
+      label: Google Account
+      description: >
+        A Google account, connected by signing in. Every Google agent in
+        the catalog asks for the same permissions, so one saved account
+        can be granted to each of them. The platform keeps and refreshes
+        the tokens; this agent receives a short-lived access token and
+        the address. An account connected before this version needs one
+        reconnect to add the new permissions. api_base_url is for tests
+        only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: google
+        authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+        token_url: https://oauth2.googleapis.com/token
+        scopes:
+          - openid
+          - https://www.googleapis.com/auth/userinfo.email
+          - https://www.googleapis.com/auth/gmail.modify
+          - https://www.googleapis.com/auth/calendar
+          - https://www.googleapis.com/auth/drive
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/forms.body.readonly
+          - https://www.googleapis.com/auth/forms.responses.readonly
+          - https://www.googleapis.com/auth/tasks
+        authorize_params: {access_type: offline, prompt: consent}
+        identity: {url: https://openidconnect.googleapis.com/v1/userinfo, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: proposal
+      label: Proposed Time
+      description: One candidate slot the agent offered, and whether it was taken.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: start,     label: Start,     type: string, storage: keys, required: true}
+        - {name: end,       label: End,       type: string, storage: keys, required: true}
+        - {name: timezone,  label: Time Zone, type: string, storage: keys, required: true}
+        - {name: attendees, label: Attendees, type: string, storage: keys, required: true}
+        - {name: status,    label: Status,    type: select, storage: keys, required: true, options: [offered, booked, dropped]}
+        - {name: event_id,  label: Event ID,  type: string, storage: keys, required: false}
+
+    - id: booking
+      label: Booking
+      description: An event this agent created, moved or cancelled, and its Google id.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: event_id,  label: Event ID,  type: string, storage: keys, required: true}
+        - {name: summary,   label: Title,     type: string, storage: keys, required: true}
+        - {name: start,     label: Start,     type: string, storage: keys, required: true}
+        - {name: end,       label: End,       type: string, storage: keys, required: true}
+        - {name: attendees, label: Attendees, type: string, storage: keys, required: false}
+        - {name: status,    label: Status,    type: select, storage: keys, required: true, options: [created, updated, cancelled]}
+        - {name: link,      label: Link,      type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected calendar.
+    resources:
+      secrets: [google]
+    functions:
+      - id: status
+        name: Calendar Status
+        description: Confirm the connection and report the calendar's time zone.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email, timezone]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            timezone:  {type: string}
+            problem:   {type: string}
+
+  - id: events
+    name: Events
+    description: Reads the calendar, checks availability, proposes times, and books on authorization.
+    resources:
+      secrets: [google]
+      data:    [proposal, booking]
+    functions:
+      - id: list
+        name: List Events
+        description: >
+          Events between time_min and time_max (ISO 8601), oldest first,
+          recurring ones expanded. Use page_token to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [time_min, time_max]
+          properties:
+            time_min:    {type: string, minLength: 10, maxLength: 40}
+            time_max:    {type: string, minLength: 10, maxLength: 40}
+            query:       {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 100, default: 25}
+            page_token:  {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [events, timezone]
+          properties:
+            timezone: {type: string}
+            events:
+              type: array
+              items:
+                type: object
+                properties:
+                  event_id:  {type: string}
+                  summary:   {type: string}
+                  start:     {type: string}
+                  end:       {type: string}
+                  all_day:   {type: boolean}
+                  location:  {type: string}
+                  organizer: {type: string}
+                  attendees: {type: string}
+                  status:    {type: string}
+                  link:      {type: string}
+            next_page_token: {type: string}
+
+      - id: get
+        name: Get Event
+        description: >
+          One event with each attendee's actual response (accepted,
+          declined, tentative, needsAction).
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [event_id]
+          properties:
+            event_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [event_id, summary, start, end, status, responses]
+          properties:
+            event_id: {type: string}
+            summary:  {type: string}
+            start:    {type: string}
+            end:      {type: string}
+            status:   {type: string}
+            link:     {type: string}
+            responses:
+              type: array
+              items:
+                type: object
+                properties:
+                  email:    {type: string}
+                  response: {type: string}
+
+      - id: availability
+        name: Check Availability
+        description: >
+          Busy periods for the account and the given attendees between
+          time_min and time_max, from Google's free/busy. "unchecked"
+          names attendees whose calendar could not be read (not shared,
+          unknown) — never treat them as free.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [time_min, time_max]
+          properties:
+            time_min:  {type: string, minLength: 10, maxLength: 40}
+            time_max:  {type: string, minLength: 10, maxLength: 40}
+            attendees: {type: array, maxItems: 20, items: {type: string, maxLength: 200}}
+        outputs:
+          type: object
+          required: [busy, unchecked]
+          properties:
+            busy:
+              type: array
+              items:
+                type: object
+                properties:
+                  email: {type: string}
+                  start: {type: string}
+                  end:   {type: string}
+            unchecked:
+              type: array
+              items:
+                type: object
+                properties:
+                  email:  {type: string}
+                  reason: {type: string}
+
+      - id: find_times
+        name: Find Meeting Times
+        description: >
+          Candidate slots of duration_minutes on business days from
+          from_date to to_date (YYYY-MM-DD, inclusive), inside
+          working_hours (HH:MM, default 09:00–17:00), outside every avoid
+          window (HH:MM pairs, e.g. lunch), with buffer_minutes kept clear
+          before and after every existing meeting of every checked
+          calendar, and not before not_before (ISO 8601, default now).
+          timezone is an IANA zone, default the calendar's. Slots are
+          free for the account and every attendee that could be checked;
+          "unchecked" names the rest. Each candidate is recorded as a
+          proposal the user can pick by proposal_ref.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {proposal: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [duration_minutes, from_date, to_date]
+          properties:
+            duration_minutes: {type: integer, minimum: 5, maximum: 480}
+            from_date:        {type: string, minLength: 10, maxLength: 10}
+            to_date:          {type: string, minLength: 10, maxLength: 10}
+            attendees:        {type: array, maxItems: 20, items: {type: string, maxLength: 200}}
+            timezone:         {type: string, maxLength: 60}
+            working_hours:
+              type: object
+              additionalProperties: false
+              properties:
+                start: {type: string, maxLength: 5, default: "09:00"}
+                end:   {type: string, maxLength: 5, default: "17:00"}
+            avoid:
+              type: array
+              maxItems: 5
+              items:
+                type: object
+                additionalProperties: false
+                required: [start, end]
+                properties:
+                  start: {type: string, maxLength: 5}
+                  end:   {type: string, maxLength: 5}
+            buffer_minutes:   {type: integer, minimum: 0, maximum: 120, default: 0}
+            not_before:       {type: string, maxLength: 40}
+            max_candidates:   {type: integer, minimum: 1, maximum: 20, default: 5}
+        outputs:
+          type: object
+          required: [candidates, unchecked, timezone]
+          properties:
+            timezone: {type: string}
+            candidates:
+              type: array
+              items:
+                type: object
+                properties:
+                  proposal_ref: {type: string, x-resource: {type: data, id: proposal}}
+                  start:        {type: string}
+                  end:          {type: string}
+                  weekday:      {type: string}
+            unchecked:
+              type: array
+              items:
+                type: object
+                properties:
+                  email:  {type: string}
+                  reason: {type: string}
+
+      - id: create
+        name: Create Event
+        description: >
+          Book a meeting: from a proposal (proposal_ref) or explicit
+          start/end. An external action — only on the user's go-ahead.
+          Invitations go to the attendees; that is not their acceptance.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {proposal: [read, update], booking: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [summary]
+          properties:
+            summary:      {type: string, minLength: 1, maxLength: 200}
+            proposal_ref: {type: string, x-resource: {type: data, id: proposal}}
+            start:        {type: string, maxLength: 40}
+            end:          {type: string, maxLength: 40}
+            timezone:     {type: string, maxLength: 60}
+            attendees:    {type: array, maxItems: 20, items: {type: string, maxLength: 200}}
+            description:  {type: string, maxLength: 4000}
+            location:     {type: string, maxLength: 300}
+        outputs:
+          type: object
+          required: [booking_ref, event_id, start, end, invited]
+          properties:
+            booking_ref: {type: string, x-resource: {type: data, id: booking}}
+            event_id:    {type: string}
+            start:       {type: string}
+            end:         {type: string}
+            link:        {type: string}
+            invited:     {type: array, items: {type: string}}
+
+      - id: update
+        name: Update Event
+        description: >
+          Move or retitle an event this account owns. An external action
+          — only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {booking: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [event_id]
+          properties:
+            event_id:    {type: string, minLength: 1, maxLength: 200}
+            summary:     {type: string, maxLength: 200}
+            start:       {type: string, maxLength: 40}
+            end:         {type: string, maxLength: 40}
+            timezone:    {type: string, maxLength: 60}
+            description: {type: string, maxLength: 4000}
+            location:    {type: string, maxLength: 300}
+        outputs:
+          type: object
+          required: [booking_ref, event_id, start, end]
+          properties:
+            booking_ref: {type: string, x-resource: {type: data, id: booking}}
+            event_id:    {type: string}
+            start:       {type: string}
+            end:         {type: string}
+            link:        {type: string}
+
+      - id: cancel
+        name: Cancel Event
+        description: >
+          Cancel an event this account owns; attendees are notified. An
+          external action — only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {booking: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [event_id]
+          properties:
+            event_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [cancelled, event_id]
+          properties:
+            cancelled:   {type: boolean}
+            event_id:    {type: string}
+            booking_ref: {type: string, x-resource: {type: data, id: booking}}

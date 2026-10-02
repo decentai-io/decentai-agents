@@ -1,0 +1,581 @@
+# The Notion agent — one Notion workspace, as far as the person shared
+# it with the integration while signing in, over the Notion API
+# (version 2022-06-28, pinned on purpose: newer versions reshape
+# databases into data sources).
+#
+# It finds pages and databases by title, reads a page as properties and
+# text lines, reads a database's schema and queries its rows. Every
+# change to the workspace others share — a new page or row, a changed
+# property, appended blocks, a comment — is a level-3 action that waits
+# for the user, is checked against the database's schema before it is
+# sent, and leaves a `write` record. A database can be watched on a
+# schedule for new and changed rows.
+
+schema_version: "1.0"
+
+agent:
+  id: notion
+  name: Notion
+  version: "0.1.2"
+  description: >
+    Your Notion workspace, through the assistant. Find a page, read it,
+    look through a database, and add or update pages, rows and comments
+    on your go-ahead.
+  tags:
+    - notes
+    - knowledge
+    - notion
+    - productivity
+  examples:
+    - title: "Read a page"
+      prompt: "Find the showroom launch plan in Notion and tell me which to-dos are still open."
+    - title: "Look through a database"
+      prompt: "In the Office move tasks database, which tasks are In progress and due this week?"
+    - title: "Add a row"
+      prompt: "Add a task to Office move tasks: order desk lamps, owner Dana, due 2026-09-20, status Not started."
+  instructions: >
+    Use this agent to find, read and write pages and databases in the
+    person's Notion workspace. It sees only the pages the person shared
+    with the integration; when Notion says something is not shared or
+    not found, tell the person to share that page with the integration
+    (the page's ... menu, then Connections) or to reconnect and select
+    it, and do not guess another id. Take page and database ids from
+    search.find, databases.query or pages.read, never invent them.
+    Read a long page in windows with from and next_from. BEFORE
+    writing a database row (pages.create with database_id, or
+    pages.update on a row), call databases.get and use only property
+    names and option values it lists; never invent a property, an
+    option or a value the person did not give. Creating pages or rows,
+    updating properties, appending blocks and adding comments change a
+    workspace other people share and may pause for approval; say what
+    will change before each. To follow a database, record
+    watch.database once and schedule watch.changes with wake_field
+    "rows"; Notion keeps edit times to the minute, so a second edit to
+    the same row within one minute is not seen as a new change.
+
+implementation:
+  entrypoint: agent:NotionAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - api.notion.com
+
+resources:
+  secrets:
+    - id: notion
+      label: Notion Workspace
+      description: >
+        A Notion workspace, connected by signing in. The agent sees only
+        the pages the person shared with the integration while signing
+        in. api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: notion
+        authorize_url: https://api.notion.com/v1/oauth/authorize
+        token_url: https://api.notion.com/v1/oauth/token
+        # Notion grants what the integration's capabilities say, not
+        # scopes; the list is required by the contract and ignored.
+        scopes: [workspace]
+        authorize_params: {owner: user}
+        # The client authenticates with HTTP Basic, the body is JSON, and
+        # whose account it is comes back in the token response itself.
+        token_auth: basic
+        token_format: json
+        identity: {source: token, field: owner.user.person.email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: write
+      label: Notion Change
+      description: Every change this agent made to the workspace, and what was there before an update.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: action,    label: Action,    type: select, storage: keys,   required: true, options: [page_created, page_updated, blocks_appended, comment_added]}
+        - {name: page_id,   label: Page ID,   type: string, storage: keys,   required: true}
+        - {name: title,     label: Page,      type: string, storage: keys,   required: false}
+        - {name: parent_id, label: Parent ID, type: string, storage: keys,   required: false}
+        - {name: link,      label: Link,      type: string, storage: keys,   required: false}
+        - {name: changed,   label: Changed,   type: string, storage: keys,   required: false}
+        - {name: detail,    label: Detail,    type: object, storage: values, required: false}
+
+    - id: watch
+      label: Database Watch
+      description: >
+        How far a database has been read on the user's behalf: the
+        newest edit time handed on (Notion's clock, to the minute) and
+        the rows seen on that minute.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: database_id, label: Database ID,         type: string, storage: keys, required: true}
+        - {name: database,    label: Database,            type: string, storage: keys, required: true}
+        - {name: since,       label: Read Up To,          type: string, storage: keys, required: true}
+        - {name: seen,        label: Rows Seen That Minute, type: string, storage: keys, required: false}
+        - {name: status,      label: Status,              type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,        label: Note,                type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Notion workspace.
+    resources:
+      secrets: [notion]
+    functions:
+      - id: status
+        name: Workspace Status
+        description: Confirm the connection works, and name the workspace and the integration.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, workspace]
+          properties:
+            connected:   {type: boolean}
+            workspace:   {type: string}
+            integration: {type: string}
+            account:     {type: string}
+            problem:     {type: string}
+
+  - id: search
+    name: Search
+    description: Finds pages and databases shared with the integration.
+    resources:
+      secrets: [notion]
+    functions:
+      - id: find
+        name: Find Pages and Databases
+        description: >
+          Pages and databases whose title matches query (or all shared
+          ones when query is empty), newest edited first. kind narrows to
+          page or database. Use next_cursor as start_cursor to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            query:        {type: string, maxLength: 200}
+            kind:         {type: string, enum: [page, database, any], default: any}
+            max_results:  {type: integer, minimum: 1, maximum: 25, default: 20}
+            start_cursor: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [results]
+          properties:
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:          {type: string}
+                  kind:        {type: string}
+                  title:       {type: string}
+                  url:         {type: string}
+                  last_edited: {type: string}
+                  parent:      {type: string}
+            next_cursor: {type: string}
+
+  - id: pages
+    name: Pages
+    description: Reads pages; creates and updates them on authorization.
+    resources:
+      secrets: [notion]
+      data:    [write]
+    functions:
+      - id: read
+        name: Read Page
+        description: >
+          A page's (or database row's) properties as text, and its body
+          as one line per block, a window at a time: from (block index,
+          0 first) and max_blocks; total says how many top-level blocks
+          the page has and next_from where to continue. Children of
+          toggles and list items come one level down (depth 1); deeper
+          content and child pages are named, not read.
+        permission_level: 0
+        timeout_seconds: 90
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [page_id]
+          properties:
+            page_id:    {type: string, minLength: 1, maxLength: 64}
+            from:       {type: integer, minimum: 0, maximum: 1000, default: 0}
+            max_blocks: {type: integer, minimum: 1, maximum: 100, default: 30}
+        outputs:
+          type: object
+          required: [page_id, title, properties, blocks, from, total, more]
+          properties:
+            page_id:      {type: string}
+            title:        {type: string}
+            url:          {type: string}
+            created:      {type: string}
+            last_edited:  {type: string}
+            parent:       {type: string}
+            properties:   {type: object}
+            blocks:
+              type: array
+              items:
+                type: object
+                properties:
+                  index:    {type: integer}
+                  depth:    {type: integer}
+                  block_id: {type: string}
+                  type:     {type: string}
+                  text:     {type: string}
+            from:         {type: integer}
+            total:        {type: integer}
+            total_capped: {type: boolean}
+            more:         {type: boolean}
+            next_from:    {type: integer}
+
+      - id: create
+        name: Create Page or Row
+        description: >
+          A new row in a database (database_id) or a new page under a
+          page (parent_page_id), with optional body paragraphs. For a
+          row, properties maps property names to values (text, number,
+          true/false, an option name, a list of option names for
+          multi-select, YYYY-MM-DD for a date) and title fills the
+          title property; names and options are checked against the
+          schema first and unknown ones refused. Changes a shared
+          workspace — only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {notion: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            database_id:    {type: string, maxLength: 64}
+            parent_page_id: {type: string, maxLength: 64}
+            title:          {type: string, maxLength: 2000}
+            properties:     {type: object}
+            paragraphs:     {type: array, maxItems: 50, items: {type: string, maxLength: 2000}}
+        outputs:
+          type: object
+          required: [page_id, write_ref]
+          properties:
+            page_id:   {type: string}
+            url:       {type: string}
+            title:     {type: string}
+            parent:    {type: string}
+            write_ref: {type: string, x-resource: {type: data, id: write}}
+
+      - id: update
+        name: Update Page Properties
+        description: >
+          Change properties of a database row (checked against its
+          database's schema) or the title of a page. Returns and records
+          what each property was before. Changes a shared workspace —
+          only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {notion: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [page_id]
+          properties:
+            page_id:    {type: string, minLength: 1, maxLength: 64}
+            title:      {type: string, maxLength: 2000}
+            properties: {type: object}
+        outputs:
+          type: object
+          required: [page_id, changed, previous, write_ref]
+          properties:
+            page_id:   {type: string}
+            url:       {type: string}
+            title:     {type: string}
+            changed:   {type: array, items: {type: string}}
+            previous:  {type: object}
+            now:       {type: object}
+            write_ref: {type: string, x-resource: {type: data, id: write}}
+
+  - id: databases
+    name: Databases
+    description: A database's schema and its rows.
+    resources:
+      secrets: [notion]
+    functions:
+      - id: get
+        name: Database Schema
+        description: >
+          A database's title and schema: every property's name and type,
+          and the options of select, multi-select and status properties.
+          Read it before writing or filtering rows.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [database_id]
+          properties:
+            database_id: {type: string, minLength: 1, maxLength: 64}
+        outputs:
+          type: object
+          required: [database_id, title, properties]
+          properties:
+            database_id: {type: string}
+            title:       {type: string}
+            url:         {type: string}
+            properties:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:    {type: string}
+                  type:    {type: string}
+                  options: {type: array, items: {type: string}}
+
+      - id: query
+        name: Query Database
+        description: >
+          Rows of a database with their properties as text. Optionally
+          one condition — filter_property with filter_operator equals
+          (text, number, select, status, date), contains (text,
+          multi-select), checkbox (true/false) or on_or_after (a date,
+          YYYY-MM-DD) and filter_value — and a sort by a property or by
+          created_time / last_edited_time. Use next_cursor as
+          start_cursor to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [database_id]
+          properties:
+            database_id:     {type: string, minLength: 1, maxLength: 64}
+            filter_property: {type: string, maxLength: 200}
+            filter_operator: {type: string, enum: [equals, contains, checkbox, on_or_after]}
+            filter_value:    {type: [string, number, boolean]}
+            sort_property:   {type: string, maxLength: 200}
+            sort_direction:  {type: string, enum: [ascending, descending], default: descending}
+            max_results:     {type: integer, minimum: 1, maximum: 25, default: 20}
+            start_cursor:    {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [database, rows]
+          properties:
+            database: {type: string}
+            rows:
+              type: array
+              items:
+                type: object
+                properties:
+                  page_id:     {type: string}
+                  title:       {type: string}
+                  url:         {type: string}
+                  created:     {type: string}
+                  last_edited: {type: string}
+                  properties:  {type: object}
+            next_cursor: {type: string}
+
+  - id: blocks
+    name: Blocks
+    description: Adds content to the end of a page, on authorization.
+    resources:
+      secrets: [notion]
+      data:    [write]
+    functions:
+      - id: append
+        name: Append to Page
+        description: >
+          Add paragraphs, to-dos (with checked) and bullets to the end of
+          a page, in order. Changes a shared workspace — only on the
+          user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {notion: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [page_id, items]
+          properties:
+            page_id: {type: string, minLength: 1, maxLength: 64}
+            items:
+              type: array
+              minItems: 1
+              maxItems: 50
+              items:
+                type: object
+                additionalProperties: false
+                required: [text]
+                properties:
+                  type:    {type: string, enum: [paragraph, to_do, bullet], default: paragraph}
+                  text:    {type: string, maxLength: 2000}
+                  checked: {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [page_id, appended, write_ref]
+          properties:
+            page_id:   {type: string}
+            title:     {type: string}
+            url:       {type: string}
+            appended:  {type: integer}
+            block_ids: {type: array, items: {type: string}}
+            write_ref: {type: string, x-resource: {type: data, id: write}}
+
+  - id: comments
+    name: Comments
+    description: A page's comments; adding one on authorization.
+    resources:
+      secrets: [notion]
+      data:    [write]
+    functions:
+      - id: list
+        name: List Comments
+        description: The unresolved comments on a page, oldest first, with author ids.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {notion: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [page_id]
+          properties:
+            page_id:      {type: string, minLength: 1, maxLength: 64}
+            max_results:  {type: integer, minimum: 1, maximum: 25, default: 20}
+            start_cursor: {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [comments]
+          properties:
+            comments:
+              type: array
+              items:
+                type: object
+                properties:
+                  comment_id:    {type: string}
+                  discussion_id: {type: string}
+                  author_id:     {type: string}
+                  created:       {type: string}
+                  text:          {type: string}
+            next_cursor: {type: string}
+
+      - id: add
+        name: Add Comment
+        description: >
+          Add a comment to a page, shown in Notion as written by the
+          integration. Changes a shared workspace — only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {notion: use}
+          data:    {write: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [page_id, text]
+          properties:
+            page_id: {type: string, minLength: 1, maxLength: 64}
+            text:    {type: string, minLength: 1, maxLength: 2000}
+        outputs:
+          type: object
+          required: [comment_id, page_id, write_ref]
+          properties:
+            comment_id:    {type: string}
+            discussion_id: {type: string}
+            page_id:       {type: string}
+            write_ref:     {type: string, x-resource: {type: data, id: write}}
+
+  - id: watch
+    name: Watch
+    description: Follows a database for new and changed rows, for a schedule to check.
+    resources:
+      secrets: [notion]
+      data:    [watch]
+    functions:
+      - id: database
+        name: Watch a Database
+        description: >
+          Start watching a database for new and changed rows, from now in
+          Notion's clock. Record it once, then schedule watch.changes.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {notion: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [database_id]
+          properties:
+            database_id: {type: string, minLength: 1, maxLength: 64}
+            note:        {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, database, since]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+            database:  {type: string}
+            since:     {type: string}
+
+      - id: changes
+        name: Changed Rows
+        description: >
+          Rows created or edited since the last check, for every database
+          watch (or one, by watch_ref): one row per page, oldest edit
+          first, each marked created or edited and naming its watch.
+          Moves the watch forward; "more" says a later check continues.
+          Notion keeps edit times to the minute, so a second edit to a row
+          within the minute it was reported is not seen until a later
+          edit. Schedule it with wake_field "rows" to be woken only when
+          something changed.
+        permission_level: 1
+        timeout_seconds: 90
+        schedulable: true
+        resources:
+          secrets: {notion: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, rows, more]
+          properties:
+            checked: {type: integer}
+            rows:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string}
+                  database:    {type: string}
+                  change:      {type: string}
+                  page_id:     {type: string}
+                  title:       {type: string}
+                  url:         {type: string}
+                  created:     {type: string}
+                  last_edited: {type: string}
+                  properties:  {type: object}
+            more: {type: boolean}

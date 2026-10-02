@@ -1,0 +1,215 @@
+# The Web Reader agent — reads a public web page or PDF with the
+# Documents rules: quote it, say where, never invent.
+#
+# Fetching a URL is a read (level 0). Only public internet addresses are
+# fetched: loopback, private, link-local and other internal addresses are
+# refused, on every redirect hop too, so the assistant cannot be pointed
+# at the network it runs inside. Saving a copy as a platform file is
+# level 2. No credential and no records.
+
+schema_version: "1.0"
+
+agent:
+  id: web_reader
+  name: Web Reader
+  version: "0.1.4"
+  description: >
+    Reads a public web page or PDF you give it and answers from what
+    the page says: the text in numbered sections or pages, the passages
+    that mention what you are looking for, and a saved copy another
+    agent can read.
+  tags:
+    - web
+    - reading
+    - research
+    - productivity
+  examples:
+    - title: "Read a page"
+      prompt: "Read https://www.example.com/pricing and tell me what the plans include, quoting the page."
+    - title: "Find it on the page"
+      prompt: "Does https://www.example.com/terms say anything about refunds or cancellation? Quote where."
+    - title: "Keep a copy"
+      prompt: "Save the PDF at https://www.example.com/report.pdf so I can compare it with my own document."
+  instructions: >
+    Use this agent when the user gives a web address, or wants what a
+    public page or online PDF says. pages.read returns the readable
+    text in numbered parts (sections of a web page, pages of a PDF),
+    from a part, up to max_chars; when truncated is true, read on from
+    "next". pages.find returns the passages that contain the phrases
+    with their section or page, and lists the phrases that are absent:
+    say plainly that the page does not mention them — never fill the gap
+    from memory. Quote what the page says and name the section heading
+    or page number; the final_url is the source to cite. A page that
+    builds its text with JavaScript may read as nearly empty; say so. A
+    refused address (kind forbidden) is not a public page: tell the user
+    it cannot be fetched and why. pages.save stores a copy (a PDF as
+    it is, a web page as Markdown with its source and fetch time) and
+    returns a file_ref another agent such as Documents can read.
+
+implementation:
+  entrypoint: agent:WebReaderAgent
+  dependencies:
+    - requests>=2.31,<3
+    - pypdf>=4.2,<6
+
+# Where it connects: any website — that is its work. Addresses inside
+# the network it runs in are refused by the agent itself.
+network:
+  hosts: any
+
+resources:
+  files:
+    - id: page
+      label: Saved Web Page
+      description: A copy of a public page or PDF, saved for another agent to read.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - text/markdown
+          - text/plain
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: pages
+    name: Pages
+    description: Reads, searches and saves public web pages and PDFs.
+    resources:
+      files: [page]
+    functions:
+      - id: read
+        name: Read Page
+        description: >
+          Fetch a public web page, PDF, text or JSON URL and return its
+          readable text in numbered parts (unit section, page or part),
+          from part "from", up to max_chars; when truncated, continue
+          from "next". Also the title, the final URL after redirects,
+          the content type, pages with no text layer, and the links
+          found (text and absolute URL, first 25 with the total).
+        permission_level: 0
+        timeout_seconds: 90
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:       {type: string, minLength: 8, maxLength: 2000}
+            from:      {type: integer, minimum: 1, default: 1}
+            max_chars: {type: integer, minimum: 4000, maximum: 60000, default: 20000}
+        outputs:
+          type: object
+          required: [url, final_url, title, content_type, kind, unit, parts, total_parts,
+                     total_chars, truncated, links, total_links, fetched_at]
+          properties:
+            url:          {type: string}
+            final_url:    {type: string}
+            title:        {type: string}
+            content_type: {type: string}
+            kind:         {type: string, enum: [html, pdf, text, json]}
+            unit:         {type: string, enum: [section, page, part]}
+            parts:
+              type: array
+              items:
+                type: object
+                properties:
+                  number:  {type: integer}
+                  heading: {type: string}
+                  text:    {type: string}
+                  clipped: {type: boolean}
+            total_parts:      {type: integer}
+            total_chars:      {type: integer}
+            truncated:        {type: boolean}
+            next:             {type: integer}
+            unreadable_pages: {type: array, items: {type: integer}}
+            links:
+              type: array
+              items:
+                type: object
+                properties:
+                  text: {type: string}
+                  url:  {type: string}
+            total_links:    {type: integer}
+            fetched_at:     {type: string}
+            body_truncated: {type: boolean}
+            note:           {type: string}
+
+      - id: find
+        name: Find On Page
+        description: >
+          Fetch a page and find a phrase (or up to ten phrases), matched
+          without regard to case or line breaks. Each match comes with
+          its section or page number, heading and a short surrounding
+          quote. "absent" lists the phrases the page does not contain.
+        permission_level: 0
+        timeout_seconds: 90
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:     {type: string, minLength: 8, maxLength: 2000}
+            phrase:  {type: string, maxLength: 200}
+            phrases: {type: array, maxItems: 10, items: {type: string, maxLength: 200}}
+        outputs:
+          type: object
+          required: [url, final_url, title, unit, phrases, absent, matches, total_matches, more]
+          properties:
+            url:       {type: string}
+            final_url: {type: string}
+            title:     {type: string}
+            unit:      {type: string}
+            phrases:
+              type: array
+              items:
+                type: object
+                properties:
+                  phrase: {type: string}
+                  found:  {type: boolean}
+                  count:  {type: integer}
+            absent: {type: array, items: {type: string}}
+            matches:
+              type: array
+              items:
+                type: object
+                properties:
+                  phrase:  {type: string}
+                  number:  {type: integer}
+                  heading: {type: string}
+                  quote:   {type: string}
+            total_matches:    {type: integer}
+            more:             {type: boolean}
+            unreadable_pages: {type: array, items: {type: integer}}
+            fetched_at:       {type: string}
+            note:             {type: string}
+
+      - id: save
+        name: Save Page
+        description: >
+          Save a copy of a page as a platform file another agent (such
+          as Documents) can read by file_ref: a PDF as its original
+          bytes, a web page as Markdown of its readable text, anything
+          else textual as plain text — each headed with the source URL
+          and the fetch time. At most 25 MB; a larger page is refused
+          with its size.
+        permission_level: 2
+        timeout_seconds: 90
+        resources:
+          files: {page: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:      {type: string, minLength: 8, maxLength: 2000}
+            filename: {type: string, maxLength: 120}
+        outputs:
+          type: object
+          required: [file_ref, filename, size, mime_type, kind, source_url, fetched_at]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: page}}
+            filename:   {type: string}
+            size:       {type: integer}
+            mime_type:  {type: string}
+            kind:       {type: string}
+            source_url: {type: string}
+            fetched_at: {type: string}

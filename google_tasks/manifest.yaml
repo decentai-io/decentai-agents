@@ -1,0 +1,506 @@
+# The Google Tasks agent — a person's own Google Tasks lists, read and
+# changed through the platform's gates, over the Google Tasks API.
+#
+# Microsoft To Do's twin: the same functions, the same record and the
+# same rules. Reads lists and tasks; creates, edits, completes and
+# reopens a personal task as an ordinary level-1 change (private and
+# inert, like a Gmail draft); deletes one only as a level-3 action. A
+# watch keeps a cursor in Google's own clock, so a schedule can wake the
+# assistant only when something was ticked off or changed — which is
+# how these tasks are kept in step with the platform's own Tasks agent.
+# What Google Tasks does not have (importance, reminders) this agent
+# does not offer; what it has instead (subtasks) it does.
+#
+# Fictional demo data lives in the demo account, never here.
+
+schema_version: "1.0"
+
+agent:
+  id: google_tasks
+  name: Google Tasks
+  version: "0.1.2"
+  description: >
+    Your Google Tasks lists, read and kept through the assistant. See
+    what is open and what is due, add tasks and subtasks, edit them,
+    tick them off or reopen them, and be told when something was
+    completed or changed in Google Tasks — so the tasks you keep here
+    and there stay in step. Deleting a task waits for your go-ahead.
+  tags:
+    - tasks
+    - to-do
+    - google
+    - productivity
+  examples:
+    - title: "What is open"
+      prompt: "What is still open in my Google Tasks, and what is due this week?"
+    - title: "Add a task"
+      prompt: "Add \"Send the chair quotation to Dana\" to my Google Tasks, due Thursday, with a subtask to attach the PDF."
+    - title: "Keep in step"
+      prompt: "Every morning, check what I ticked off in Google Tasks and mark the matching tasks done here."
+  instructions: >
+    Use this agent for the user's own Google Tasks lists. Find a list
+    with lists.list and a task with tasks.list before changing
+    anything; every task is addressed by its list_id and task_id, which
+    are Google's own — pass them on unchanged and never invent one.
+    Due dates are YYYY-MM-DD (Google keeps no time of day); a subtask
+    is a task created with parent set to another task's task_id. When a
+    date is ambiguous ("Thursday") say which date you took. Creating,
+    editing, completing and reopening a task are ordinary changes;
+    tasks.delete cannot be undone (its subtasks go with it) and needs
+    the user's explicit go-ahead. KEEPING IN STEP WITH THE TASKS AGENT
+    — agents cannot call each other, so you carry the task across. To
+    copy a Google task into Tasks: read it here (tasks.get), then
+    tasks.create in the Tasks agent with the same title and due date
+    and source exactly "google_tasks:<task_id>". To copy a Tasks item
+    into Google Tasks: tasks.create here with its title and due date,
+    and end the note with "Tasks item: <task_ref>". To pull what was
+    ticked off in Google Tasks: record a watch ONCE (sync.watch, one
+    list or every list) and schedule sync.completed with wake_field
+    "completed"; for each row, find the matching Tasks item (tasks.list
+    with source "google_tasks:<task_id>", or the task_ref named in the
+    row's note) and mark it done with tasks.update: status done, done_on
+    the date part of the row's completed, evidence "Completed in Google
+    Tasks on <completed>". Tasks already done there need nothing. For any edit
+    made in Google Tasks, schedule sync.changed with wake_field
+    "changed" instead. Never record a second watch for the same
+    request.
+
+implementation:
+  entrypoint: agent:GoogleTasksAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - tasks.googleapis.com
+
+resources:
+  secrets:
+    - id: google
+      label: Google Account
+      description: >
+        A Google account, connected by signing in — the same connection
+        the Gmail, Google Calendar and Google Drive agents use; grant one
+        saved account to all of them. The platform keeps and refreshes
+        the tokens; this agent receives a short-lived access token.
+        api_base_url is for tests only.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: google
+        authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+        token_url: https://oauth2.googleapis.com/token
+        scopes:
+          - openid
+          - https://www.googleapis.com/auth/userinfo.email
+          - https://www.googleapis.com/auth/gmail.modify
+          - https://www.googleapis.com/auth/calendar
+          - https://www.googleapis.com/auth/drive
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/forms.body.readonly
+          - https://www.googleapis.com/auth/forms.responses.readonly
+          - https://www.googleapis.com/auth/tasks
+        authorize_params: {access_type: offline, prompt: consent}
+        identity: {url: https://openidconnect.googleapis.com/v1/userinfo, field: email}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: watch
+      label: Google Tasks Watch
+      description: >
+        How far one list (or every list) has been read on the user's
+        behalf: the time of the newest completion and of the newest
+        change handed on (Google's clock, UTC), each with the ids that
+        sit exactly on that second.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: list_id,         label: List ID,                  type: string, storage: keys, required: false}
+        - {name: list_name,       label: List,                     type: string, storage: keys, required: false}
+        - {name: completed_since, label: Completions Read Up To,   type: string, storage: keys, required: true}
+        - {name: completed_ids,   label: Completed At That Second, type: string, storage: keys, required: false}
+        - {name: changed_since,   label: Changes Read Up To,       type: string, storage: keys, required: true}
+        - {name: changed_ids,     label: Changed At That Second,   type: string, storage: keys, required: false}
+        - {name: status,          label: Status,                   type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,            label: Note,                     type: string, storage: keys, required: false}
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Google account.
+    resources:
+      secrets: [google]
+    functions:
+      - id: status
+        name: Account Status
+        description: Confirm the Google connection reaches the account's tasks, and which address it is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected: {type: boolean}
+            email:     {type: string}
+            problem:   {type: string}
+
+  - id: lists
+    name: Lists
+    description: The account's task lists.
+    resources:
+      secrets: [google]
+    functions:
+      - id: list
+        name: List Task Lists
+        description: The account's Google Tasks lists with their ids, the default list first.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [lists, more]
+          properties:
+            more: {type: boolean}
+            lists:
+              type: array
+              items:
+                type: object
+                properties:
+                  list_id: {type: string}
+                  name:    {type: string}
+                  updated: {type: string}
+
+      - id: create
+        name: Create Task List
+        description: Make a new Google Tasks list in the account.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 1024}
+        outputs:
+          type: object
+          required: [list_id, name]
+          properties:
+            list_id: {type: string}
+            name:    {type: string}
+            updated: {type: string}
+
+  - id: tasks
+    name: Tasks
+    description: Reads tasks, and adds, edits, completes, reopens and deletes them.
+    resources:
+      secrets: [google]
+    functions:
+      - id: list
+        name: List Tasks
+        description: >
+          A list's tasks (the default list when list_id is not given),
+          most recently changed first: status "open" (default),
+          "completed" or "all", and only those due before due_before
+          (YYYY-MM-DD) when given. A subtask names its parent. Notes are
+          clipped; tasks.get reads one whole. Use page_token, with the
+          same list_id and filters, to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            list_id:     {type: string, maxLength: 400}
+            status:      {type: string, enum: [open, completed, all], default: open}
+            due_before:  {type: string, maxLength: 10}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+            page_token:  {type: string, maxLength: 20}
+        outputs:
+          type: object
+          required: [list_id, tasks]
+          properties:
+            list_id: {type: string}
+            tasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_id:   {type: string}
+                  list_id:   {type: string}
+                  title:     {type: string}
+                  status:    {type: string}
+                  due:       {type: string}
+                  completed: {type: string}
+                  modified:  {type: string}
+                  parent:    {type: string}
+                  link:      {type: string}
+                  note:      {type: string}
+            next_page_token: {type: string}
+
+      - id: get
+        name: Get Task
+        description: >
+          One task whole: its notes (cut at max_note_chars) and its
+          subtasks, each with its status.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [list_id, task_id]
+          properties:
+            list_id:        {type: string, minLength: 1, maxLength: 400}
+            task_id:        {type: string, minLength: 1, maxLength: 400}
+            max_note_chars: {type: integer, minimum: 200, maximum: 8192, default: 2000}
+        outputs:
+          type: object
+          required: [task_id, list_id, title, status, note, note_truncated, subtasks]
+          properties:
+            task_id:        {type: string}
+            list_id:        {type: string}
+            title:          {type: string}
+            status:         {type: string}
+            due:            {type: string}
+            completed:      {type: string}
+            modified:       {type: string}
+            parent:         {type: string}
+            link:           {type: string}
+            note:           {type: string}
+            note_truncated: {type: boolean}
+            subtasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  title:   {type: string}
+                  status:  {type: string}
+
+      - id: create
+        name: Create Task
+        description: >
+          Add a task to a list (the default list when list_id is not
+          given): title, due (YYYY-MM-DD) and a note; parent makes it a
+          subtask of that task. A private task in the user's own account.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [title]
+          properties:
+            list_id: {type: string, maxLength: 400}
+            title:   {type: string, minLength: 1, maxLength: 1024}
+            due:     {type: string, maxLength: 10}
+            note:    {type: string, maxLength: 8192}
+            parent:  {type: string, maxLength: 400}
+        outputs: &task_row
+          type: object
+          required: [task_id, list_id, title, status]
+          properties:
+            task_id:   {type: string}
+            list_id:   {type: string}
+            title:     {type: string}
+            status:    {type: string}
+            due:       {type: string}
+            completed: {type: string}
+            modified:  {type: string}
+            parent:    {type: string}
+            link:      {type: string}
+            note:      {type: string}
+
+      - id: update
+        name: Update Task
+        description: >
+          Change a task's title, due date or note. Only what is given
+          changes; an empty due clears it.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [list_id, task_id]
+          properties:
+            list_id: {type: string, minLength: 1, maxLength: 400}
+            task_id: {type: string, minLength: 1, maxLength: 400}
+            title:   {type: string, minLength: 1, maxLength: 1024}
+            due:     {type: string, maxLength: 10}
+            note:    {type: string, maxLength: 8192}
+        outputs: *task_row
+
+      - id: complete
+        name: Complete Task
+        description: Tick a task off; Google records when.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs: &task_address
+          type: object
+          additionalProperties: false
+          required: [list_id, task_id]
+          properties:
+            list_id: {type: string, minLength: 1, maxLength: 400}
+            task_id: {type: string, minLength: 1, maxLength: 400}
+        outputs: *task_row
+
+      - id: reopen
+        name: Reopen Task
+        description: Mark a completed task as needing action again.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs: *task_address
+        outputs: *task_row
+
+      - id: delete
+        name: Delete Task
+        description: >
+          Delete a task from Google Tasks, with its subtasks. It cannot be
+          undone — only on the user's explicit go-ahead.
+        permission_level: 3
+        timeout_seconds: 30
+        resources:
+          secrets: {google: use}
+        inputs: *task_address
+        outputs:
+          type: object
+          required: [deleted, task_id]
+          properties:
+            deleted: {type: boolean}
+            task_id: {type: string}
+            title:   {type: string}
+
+  - id: sync
+    name: Watches
+    description: >
+      Remembers how far the lists have been read, and hands on what was
+      completed or changed since.
+    resources:
+      secrets: [google]
+      data:    [watch]
+    functions:
+      - id: watch
+        name: Watch Lists
+        description: >
+          Start watching one list (list_id) or every list, from now (or
+          from "since", an ISO 8601 date-time). Record it once, then
+          schedule sync.completed or sync.changed.
+        permission_level: 1
+        timeout_seconds: 60
+        resources:
+          secrets: {google: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            list_id: {type: string, maxLength: 400}
+            since:   {type: string, maxLength: 40}
+            note:    {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, list_id, list_name, since]
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            list_id:   {type: string}
+            list_name: {type: string}
+            since:     {type: string}
+
+      - id: completed
+        name: Completed Since
+        description: >
+          Tasks ticked off since the last check, for every watch (or one,
+          by watch_ref): one row per task, oldest completion first, with
+          its list's name and its watch. Editing a task already completed
+          does not report it again. Moves the watch's completion cursor;
+          "more" says a later check continues. Schedule it with
+          wake_field "completed" to be woken only when something was
+          completed.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {google: use}
+          data:    {watch: [list, read, update]}
+        inputs: &check_inputs
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:
+              type: string
+              x-resource: {type: data, id: watch}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, completed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            completed: &sync_rows
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref: {type: string, x-resource: {type: data, id: watch}}
+                  list_id:   {type: string}
+                  list_name: {type: string}
+                  task_id:   {type: string}
+                  title:     {type: string}
+                  status:    {type: string}
+                  due:       {type: string}
+                  completed: {type: string}
+                  modified:  {type: string}
+                  parent:    {type: string}
+                  link:      {type: string}
+                  note:      {type: string}
+
+      - id: changed
+        name: Changed Since
+        description: >
+          Tasks created or changed since the last check — completions
+          included — for every watch (or one, by watch_ref), oldest first,
+          each with its status, list name and watch. Moves the watch's
+          change cursor, separate from the completion cursor; "more" says
+          a later check continues. Schedule it with wake_field "changed".
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {google: use}
+          data:    {watch: [list, read, update]}
+        inputs: *check_inputs
+        outputs:
+          type: object
+          required: [checked, changed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            changed: *sync_rows

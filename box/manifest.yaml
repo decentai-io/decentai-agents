@@ -1,0 +1,605 @@
+# The Box agent — one Box account, searched, fetched, filed, shared and
+# watched through the platform's gates, over Box API 2.0.
+#
+# The Google Drive, OneDrive and Dropbox agents' twin: the same functions
+# and the same rules. It finds files by name or content, lists what
+# others shared with the account, says who can open a file, and brings a
+# copy into the platform for another agent to read (an Office file can
+# come in as PDF). Every change to the Box — uploading, making a folder,
+# moving, renaming, trashing, sharing, un-sharing — is a level-3 action
+# that waits for the user. Deleting goes to the Box trash; a link is for
+# the company unless the user asks for "anyone with the link". Beyond
+# the drive twins, the account's change stream can be watched so a
+# schedule wakes the assistant only when something changed.
+
+schema_version: "1.0"
+
+agent:
+  id: box
+  name: Box
+  version: "0.1.3"
+  description: >
+    Your Box, through the assistant. Find a file, see who can open it,
+    hand a copy to another agent to read, file or share on your
+    go-ahead, and hear about what changed.
+  tags:
+    - files
+    - storage
+    - box
+    - productivity
+  examples:
+    - title: "Find a file"
+      prompt: "Find the Riverside lease in my Box and save a copy for me to read."
+    - title: "Who can see it"
+      prompt: "Who has access to the Q3 budget workbook in Box?"
+    - title: "File and share"
+      prompt: "Put the file I just attached in Contracts and share it with dana@sidra.example, view only."
+    - title: "Hear what changed"
+      prompt: "Watch my Box and, whenever a file is uploaded to Invoices, save a copy and tell me what it is."
+  instructions: >
+    Use this agent to find, fetch, file, share or watch files in a Box
+    account. Files and folders are addressed by item_id (Box's numeric
+    id; the top folder is "0"); take it from a search, a folder listing
+    or shared_with_me, never invent one. files.download brings a copy
+    into the platform as a file another agent (Documents, Sheets) can
+    read; as_pdf converts an Office file on the way. Uploading, creating
+    a folder, moving, renaming, trashing, sharing and un-sharing change
+    the user's Box and may pause for approval; ask before each. Delete
+    moves to the Box trash — say so. sharing.link shares with the user's
+    company unless they explicitly ask for anyone with the link; never
+    choose open access on your own. People are email addresses: resolve
+    a name first (from a mail thread, or ask). Before sharing,
+    sharing.permissions shows who can already open the file. To act on
+    what changes in the account, record a watch ONCE (changes.watch) and
+    schedule changes.new with wake_field "changes" every few minutes;
+    each wake carries only what changed since the last check, oldest
+    first, and a watch covers the whole account — narrow by the rows'
+    folder as the user's instruction says. Never record a second watch
+    for the same request.
+
+implementation:
+  entrypoint: agent:BoxAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects, and the whole of it. The consent and token
+# addresses above are the platform's to call, not the agent's.
+network:
+  hosts:
+    - api.box.com
+    - upload.box.com
+    # where a download is redirected to
+    - "*.boxcloud.com"
+
+resources:
+  secrets:
+    - id: box
+      label: Box Account
+      description: >
+        A Box account, connected by signing in. The platform keeps and
+        refreshes the tokens (Box issues a new refresh token each time).
+        api_base_url is for tests only; leave it empty.
+      binding: {cardinality: one, required: true}
+      oauth:
+        provider: box
+        authorize_url: https://account.box.com/api/oauth2/authorize
+        token_url: https://api.box.com/oauth2/token
+        scopes:
+          - root_readwrite
+        identity: {url: https://api.box.com/2.0/users/me, field: login}
+      fields:
+        - {name: api_base_url, label: API Base URL (tests only), type: string, storage: keys, required: false}
+
+  data:
+    - id: share
+      label: Share
+      description: Every share this agent granted or revoked, and for whom.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: item_id,       label: Item ID,       type: string, storage: keys, required: true}
+        - {name: name,          label: File,          type: string, storage: keys, required: true}
+        - {name: kind,          label: Kind,          type: select, storage: keys, required: true, options: [invite, link]}
+        - {name: who,           label: Who,           type: string, storage: keys, required: true}
+        - {name: role,          label: Role,          type: select, storage: keys, required: true, options: [read, write]}
+        - {name: link,          label: Link,          type: string, storage: keys, required: false}
+        - {name: permission_id, label: Permission ID, type: string, storage: keys, required: false}
+        - {name: status,        label: Status,        type: select, storage: keys, required: true, options: [granted, revoked]}
+
+    - id: watch
+      label: Change Watch
+      description: >
+        The account's change stream, watched on the user's behalf: Box's
+        own stream position, and the ids of the events most recently
+        handed on, so an event Box delivers twice is not handed on twice.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: cursor,   label: Stream Position,  type: string, storage: keys, required: true}
+        - {name: seen_ids, label: Recent Event IDs, type: string, storage: keys, required: false}
+        - {name: status,   label: Status,           type: select, storage: keys, required: true, options: [watching, closed]}
+        - {name: note,     label: Note,             type: string, storage: keys, required: false}
+
+  files:
+    - id: download
+      label: Downloaded File
+      description: A copy of a Box file, brought in for another agent to read.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+          - text/csv
+          - text/plain
+          - text/markdown
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        max_size_mb: 25  # the platform's upload limit
+    - id: outgoing
+      label: File to Upload
+      description: A file in the platform — attached to the chat or saved by another agent — to put into Box.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/pdf
+          - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+          - text/csv
+          - text/plain
+          - text/markdown
+          - image/png
+          - image/jpeg
+          - application/octet-stream
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: account
+    name: Account
+    description: The connected Box account.
+    resources:
+      secrets: [box]
+    functions:
+      - id: status
+        name: Box Status
+        description: Confirm the connection, the company it belongs to if any, and how full the account is.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [connected, email]
+          properties:
+            connected:   {type: boolean}
+            email:       {type: string}
+            enterprise:  {type: string}
+            used_bytes:  {type: integer}
+            total_bytes: {type: integer}
+            problem:     {type: string}
+
+  - id: files
+    name: Files
+    description: Finds, fetches and files — reads freely, changes the Box only on authorization.
+    resources:
+      secrets: [box]
+      files:   [download, outgoing]
+    functions:
+      - id: search
+        name: Search Files
+        description: >
+          Files whose name or content matches query, across the account's
+          Box. Use page_token to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query:       {type: string, minLength: 1, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+            page_token:  {type: string, maxLength: 200}
+        outputs: &item_list
+          type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  item_id:     {type: string}
+                  name:        {type: string}
+                  kind:        {type: string}
+                  size:        {type: integer}
+                  mime_type:   {type: string}
+                  modified:    {type: string}
+                  modified_by: {type: string}
+                  folder:      {type: string}
+                  path:        {type: string}
+                  link:        {type: string}
+                  shared:      {type: boolean}
+                  shared_by:   {type: string}
+            next_page_token: {type: string}
+
+      - id: list
+        name: List Folder
+        description: >
+          What is in a folder, folders first, by folder_path ("/",
+          "/Contracts/2026") or folder_id; the top of the Box ("All
+          Files", id "0") by default. Use page_token to continue.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 25}
+            page_token:  {type: string, maxLength: 200}
+        outputs: *item_list
+
+      - id: shared_with_me
+        name: Shared With Me
+        description: >
+          Files and folders other people own and shared with the account
+          (Box keeps them at its top level), most recently changed first,
+          each with its owner as shared_by.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 25}
+        outputs: *item_list
+
+      - id: get
+        name: Get File
+        description: One file or folder's details, by item_id.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: download
+        name: Download File
+        description: >
+          Bring a copy of a file into the platform, for another agent to
+          read. as_pdf converts a Word, Excel or PowerPoint file to PDF on
+          the way. Folders cannot be downloaded; files larger than the
+          platform can carry are refused before they are fetched.
+        permission_level: 2
+        timeout_seconds: 90
+        resources:
+          secrets: {box: use}
+          files:   {download: create}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+            as_pdf:  {type: boolean, default: false}
+        outputs:
+          type: object
+          required: [file_ref, filename, size]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: download}}
+            filename: {type: string}
+            size:     {type: integer}
+
+      - id: upload
+        name: Upload File
+        description: >
+          Put a platform file (file_ref) into a Box folder, under its own
+          name or name. If the folder already has a file of that name,
+          the new one is renamed unless on_conflict is "replace" (a new
+          version of the same file) or "fail". Changes the user's Box —
+          only on their go-ahead.
+        permission_level: 3
+        timeout_seconds: 120
+        resources:
+          secrets: {box: use}
+          files:   {outgoing: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:    {type: string, x-resource: {type: file, id: outgoing}}
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+            name:        {type: string, maxLength: 200}
+            on_conflict: {type: string, enum: [rename, replace, fail], default: rename}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: create_folder
+        name: Create Folder
+        description: A new folder under folder_path or folder_id. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name:        {type: string, minLength: 1, maxLength: 200}
+            folder_path: {type: string, maxLength: 400}
+            folder_id:   {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: move
+        name: Move or Rename
+        description: >
+          Rename an item (new_name), move it to another folder
+          (to_folder_path or to_folder_id), or both. Only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:        {type: string, minLength: 1, maxLength: 200}
+            new_name:       {type: string, maxLength: 200}
+            to_folder_path: {type: string, maxLength: 400}
+            to_folder_id:   {type: string, maxLength: 200}
+        outputs:
+          type: object
+          required: [item]
+          properties:
+            item: {type: object}
+
+      - id: delete
+        name: Delete
+        description: >
+          Move an item to the Box trash, from which the user can restore
+          it; a folder goes with what is in it. Only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [deleted, name]
+          properties:
+            deleted: {type: boolean}
+            name:    {type: string}
+            note:    {type: string}
+
+  - id: sharing
+    name: Sharing
+    description: Who can open a file, and changing that on authorization.
+    resources:
+      secrets: [box]
+      data:    [share]
+    functions:
+      - id: permissions
+        name: Who Has Access
+        description: >
+          Everyone who can open an item — the owner, people invited
+          (collaborators), access inherited from a folder above, and the
+          shared link with how far it reaches.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {box: use}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [permissions]
+          properties:
+            permissions:
+              type: array
+              items:
+                type: object
+                properties:
+                  permission_id: {type: string}
+                  who:           {type: string}
+                  role:          {type: string}
+                  via:           {type: string}
+                  link:          {type: string}
+
+      - id: invite
+        name: Share With People
+        description: >
+          Give named people access to an item, read (viewer) or write
+          (editor); Box emails them. Only on the user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 60
+        resources:
+          secrets: {box: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id, recipients]
+          properties:
+            item_id:    {type: string, minLength: 1, maxLength: 200}
+            recipients: {type: array, minItems: 1, maxItems: 20, items: {type: string, maxLength: 200}}
+            role:       {type: string, enum: [read, write], default: read}
+        outputs:
+          type: object
+          required: [share_ref, invited, role]
+          properties:
+            share_ref: {type: string, x-resource: {type: data, id: share}}
+            invited:   {type: array, items: {type: string}}
+            role:      {type: string}
+
+      - id: link
+        name: Share by Link
+        description: >
+          Open an item's shared link to everyone in the user's company (the
+          default) or, only when the user asks for it, anyone with the
+          link — view, or edit for a file — and return it. Only on the
+          user's go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id]
+          properties:
+            item_id:    {type: string, minLength: 1, maxLength: 200}
+            link_type:  {type: string, enum: [view, edit], default: view}
+            link_scope: {type: string, enum: [organization, anonymous], default: organization}
+        outputs:
+          type: object
+          required: [share_ref, link, reach]
+          properties:
+            share_ref: {type: string, x-resource: {type: data, id: share}}
+            link:      {type: string}
+            reach:     {type: string}
+
+      - id: revoke
+        name: Stop Sharing
+        description: >
+          Remove one permission (from sharing.permissions) from an item: a
+          collaborator, or the shared link. The owner's cannot be removed,
+          nor access inherited from a folder above. Only on the user's
+          go-ahead.
+        permission_level: 3
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+          data:    {share: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [item_id, permission_id]
+          properties:
+            item_id:       {type: string, minLength: 1, maxLength: 200}
+            permission_id: {type: string, minLength: 1, maxLength: 200}
+        outputs:
+          type: object
+          required: [revoked, share_ref]
+          properties:
+            revoked:   {type: boolean}
+            share_ref: {type: string, x-resource: {type: data, id: share}}
+
+  - id: changes
+    name: Changes
+    description: Watches the account's change stream, so a schedule hears only what changed.
+    resources:
+      secrets: [box]
+      data:    [watch]
+    functions:
+      - id: watch
+        name: Watch for Changes
+        description: >
+          Start watching the whole Box account for changes to files and
+          folders, from now. Record it once, then schedule changes.new.
+        permission_level: 1
+        timeout_seconds: 45
+        resources:
+          secrets: {box: use}
+          data:    {watch: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            note: {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [watch_ref, since]
+          properties:
+            watch_ref: {type: string, x-resource: {type: data, id: watch}}
+            since:     {type: string}
+
+      - id: new
+        name: What Changed
+        description: >
+          What changed since the last check, for every watch (or one, by
+          watch_ref): one row per event about a file or folder — uploaded,
+          created, moved, renamed, trashed, restored, shared — oldest
+          first, each naming its watch and who did it. An event Box
+          delivers twice is handed on once. Moves each watch forward;
+          "more" says a later check continues. Schedule it with wake_field
+          "changes" to be woken only when something changed.
+        permission_level: 1
+        timeout_seconds: 60
+        schedulable: true
+        resources:
+          secrets: {box: use}
+          data:    {watch: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, changes, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            changes:
+              type: array
+              items:
+                type: object
+                properties:
+                  watch_ref:   {type: string, x-resource: {type: data, id: watch}}
+                  event_id:    {type: string}
+                  change:      {type: string}
+                  item_id:     {type: string}
+                  name:        {type: string}
+                  kind:        {type: string}
+                  path:        {type: string}
+                  folder:      {type: string}
+                  size:        {type: integer}
+                  modified:    {type: string}
+                  modified_by: {type: string}

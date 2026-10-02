@@ -1,0 +1,66 @@
+# Sample data: a "meetings" notebook with two meetings in it, and a note
+# about the Northlight chairs — what the example prompts ask to find.
+story: Sidra Office Supplies — the meetings notebook and one supplier note.
+
+files:
+  - ref: minutes
+    slot: document
+    path: samples/ops-meeting-2026-09-07.md
+
+records:
+  - slot: note
+    fields:
+      title: Ops meeting, 7 September 2026
+      notebook: meetings
+      priority: 2
+      content:
+        text: |
+          Present: Sami (operations), Lina (sales), Omar (purchasing), Priya (finance)
+
+          Harbourline office fit-out
+          - Lina will send Dana the revised quotation by Thursday 11 September.
+          - Omar will chase Northlight Seating about the 15-day delivery and confirm by 11 September.
+          - We should probably review the chair warranty terms before the next order.
+          - Sami to book the site visit once Dana has Harbourline's answer.
+
+          Finance
+          - Priya will send September's statements to the three customers with balances on Wednesday.
+          - Someone needs to update the supplier list before the audit.
+          - It might be worth asking Cloudledger about a multi-year price.
+
+          Decisions
+          - We move to the new office in November; Dana leads the furniture order on their side.
+          - Chairs: keep the 24-month warranty as a preferred requirement, not mandatory.
+
+          Next meeting: Monday 14 September, 10:00.
+        date: "2026-09-07"
+        attendees: [Sami, Lina, Omar, Priya]
+  - slot: note
+    fields:
+      title: Ops meeting, 31 August 2026
+      notebook: meetings
+      priority: 3
+      content:
+        text: |
+          Present: Sami, Lina, Omar, Priya
+
+          - Harbourline confirmed the showroom visit for 2 September (Lina).
+          - Omar opened the purchase request for twenty chairs; three quotations expected this week.
+          - Priya: Cedar Clinic paid 1,000 USD of INV-1041; the rest after their month-end.
+          - Decision: desks can ship before the chairs if Harbourline prefers a split delivery.
+        date: "2026-08-31"
+        attendees: [Sami, Lina, Omar, Priya]
+  - slot: note
+    fields:
+      title: Northlight chairs — what we know
+      notebook: suppliers
+      priority: 1
+      content:
+        text: |
+          Northlight Seating quoted Q-2041 on 2 September: twenty Aria task chairs at 275 USD, 150 USD shipping, 15 working days, 3-year warranty, flat-packed without assembly.
+          The delivery misses our ten-day requirement; Omar is asking whether they can expedite.
+          Cedar Office (Q-2042) delivers in 7 days assembled at 260 USD; Pier 9 Supply (Q-2043) is cheapest at 240 USD but takes three weeks and gives 12 months' warranty.
+        tags: [northlight, chairs, harbourline]
+  - slot: settings
+    fields:
+      sort_order: updated

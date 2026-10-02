@@ -1,0 +1,254 @@
+# The Feeds agent — RSS and Atom subscriptions, and what is new in them.
+#
+# A subscription is a record holding a cursor: the newest item's time,
+# the ids at exactly that time, and the latest ids seen (for feeds
+# without dates). feeds.new_items is schedulable: it returns what
+# arrived since in `items`, the field a schedule wakes on, and moves
+# each cursor only through what it handed on. Only public internet
+# addresses are fetched, on every redirect hop too. No credential.
+
+schema_version: "1.0"
+
+agent:
+  id: feeds
+  name: Feeds
+  version: "0.1.3"
+  description: >
+    Follows RSS and Atom feeds — news, blogs, release notes, status
+    pages — and tells you what is new since you last looked. Give it a
+    feed or just the site's address; checked on a schedule, it speaks
+    up only when something was published.
+  tags:
+    - web
+    - rss
+    - news
+    - monitoring
+  examples:
+    - title: "Follow a blog"
+      prompt: "Subscribe me to the feed on https://blog.example.com and tell me every morning what was published."
+    - title: "Catch up"
+      prompt: "What is new in my feeds since the last check?"
+    - title: "Read without subscribing"
+      prompt: "Show me the latest five items from https://www.example.com/feed.xml."
+  instructions: >
+    Use this agent for RSS and Atom feeds. feeds.add subscribes to a
+    feed URL, or to the feed a web page advertises (discovered from the
+    page's alternate link); it starts from now, so items already in the
+    feed are not news. To follow feeds on a cadence, schedule
+    feeds.new_items with wake_field "items": it returns new items
+    across subscriptions (or one), oldest first, each naming its feed,
+    and "more" when a later check continues. "failed" lists feeds that
+    could not be fetched and how many times in a row; mention them, but
+    they are not news. feeds.read shows a feed's latest items without
+    subscribing. Report titles, links and dates as the feed gives them;
+    summaries are clipped, so follow the link (Web Reader) before
+    saying more than the summary does.
+
+implementation:
+  entrypoint: agent:FeedsAgent
+  dependencies:
+    - requests>=2.31,<3
+
+# Where it connects: any website — that is its work. Addresses inside
+# the network it runs in are refused by the agent itself.
+network:
+  hosts: any
+
+resources:
+  data:
+    - id: feed
+      label: Feed Subscription
+      description: A feed followed on the user's behalf, and how far it has been read.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: feed_url,    label: Feed URL,              type: string, storage: keys, required: true}
+        - {name: page_url,    label: Discovered From,       type: string, storage: keys, required: false}
+        - {name: title,       label: Title,                 type: string, storage: keys, required: false}
+        - {name: format,      label: Format,                type: select, storage: keys, required: true, options: [rss, atom, rdf]}
+        - {name: cursor_time, label: Read Up To,            type: string, storage: keys, required: false}
+        - {name: cursor_ids,  label: Ids At That Time,      type: string, storage: keys, required: false}
+        - {name: seen_ids,    label: Latest Ids Seen,       type: string, storage: keys, required: false}
+        - {name: added_at,    label: Subscribed,            type: string, storage: keys, required: false}
+        - {name: checked_at,  label: Last Checked,          type: string, storage: keys, required: false}
+        - {name: failures,    label: Failures In A Row,     type: number, storage: keys, required: false}
+        - {name: last_error,  label: Last Error,            type: string, storage: keys, required: false}
+        - {name: note,        label: Note,                  type: string, storage: keys, required: false}
+
+tools:
+  - id: feeds
+    name: Feeds
+    description: Subscribes to feeds, reads them, and hands on what is new.
+    resources:
+      data: [feed]
+    functions:
+      - id: add
+        name: Subscribe
+        description: >
+          Subscribe to an RSS or Atom feed, given the feed's URL or a web
+          page that advertises one. Reading starts from now. Subscribing
+          twice to the same feed returns the existing subscription.
+        permission_level: 1
+        timeout_seconds: 90
+        resources:
+          data: {feed: [list, create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:  {type: string, minLength: 8, maxLength: 2000}
+            note: {type: string, maxLength: 500}
+        outputs:
+          type: object
+          required: [feed_ref, title, feed_url, discovered_from, format, items, newest, already]
+          properties:
+            feed_ref:        {type: string, x-resource: {type: data, id: feed}}
+            title:           {type: string}
+            feed_url:        {type: string}
+            discovered_from: {type: string}
+            format:          {type: string}
+            items:           {type: integer}
+            newest:          {type: string}
+            already:         {type: boolean}
+
+      - id: list
+        name: List Subscriptions
+        description: The feeds subscribed to (the first 25 by title, with the total), how far each was read, and fetch failures.
+        permission_level: 0
+        timeout_seconds: 20
+        resources:
+          data: {feed: [list]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties: {}
+        outputs:
+          type: object
+          required: [feeds, total]
+          properties:
+            total: {type: integer}
+            feeds:
+              type: array
+              items:
+                type: object
+                properties:
+                  feed_ref:   {type: string, x-resource: {type: data, id: feed}}
+                  title:      {type: string}
+                  feed_url:   {type: string}
+                  page_url:   {type: string}
+                  format:     {type: string}
+                  read_up_to: {type: string}
+                  checked_at: {type: string}
+                  failures:   {type: integer}
+                  last_error: {type: string}
+
+      - id: remove
+        name: Unsubscribe
+        description: Stop following a feed and delete its subscription.
+        permission_level: 1
+        timeout_seconds: 20
+        resources:
+          data: {feed: [read, delete]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [feed_ref]
+          properties:
+            feed_ref: {type: string, x-resource: {type: data, id: feed}}
+        outputs:
+          type: object
+          required: [removed, feed_ref, title, feed_url]
+          properties:
+            removed:  {type: boolean}
+            feed_ref: {type: string}
+            title:    {type: string}
+            feed_url: {type: string}
+
+      - id: read
+        name: Read Feed
+        description: >
+          The latest items of a feed (or of the feed a web page
+          advertises) without subscribing, in the feed's order — title,
+          link, published time (UTC), a clipped plain-text summary and
+          the author — with the total.
+        permission_level: 0
+        timeout_seconds: 60
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [url]
+          properties:
+            url:         {type: string, minLength: 8, maxLength: 2000}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 10}
+        outputs:
+          type: object
+          required: [feed_url, discovered_from, title, format, items, total]
+          properties:
+            feed_url:        {type: string}
+            discovered_from: {type: string}
+            title:           {type: string}
+            format:          {type: string}
+            total:           {type: integer}
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:        {type: string}
+                  title:     {type: string}
+                  link:      {type: string}
+                  published: {type: string}
+                  summary:   {type: string}
+                  author:    {type: string}
+
+      - id: new_items
+        name: New Items
+        description: >
+          What was published since the last check, across every
+          subscription (or one, by feed_ref): one row per item, oldest
+          first, each naming its feed. Moves each subscription forward
+          through what was returned; "more" says a later check
+          continues. Feeds that could not be fetched are listed in
+          "failed". Schedule it with wake_field "items" to be woken only
+          when something was published.
+        permission_level: 1
+        timeout_seconds: 300
+        schedulable: true
+        resources:
+          data: {feed: [list, read, update]}
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            feed_ref:    {type: string, x-resource: {type: data, id: feed}}
+            max_results: {type: integer, minimum: 1, maximum: 25, default: 20}
+        outputs:
+          type: object
+          required: [checked, items, failed, more]
+          properties:
+            checked: {type: integer}
+            more:    {type: boolean}
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  feed_ref:   {type: string, x-resource: {type: data, id: feed}}
+                  feed_title: {type: string}
+                  feed_url:   {type: string}
+                  id:         {type: string}
+                  title:      {type: string}
+                  link:       {type: string}
+                  published:  {type: string}
+                  summary:    {type: string}
+                  author:     {type: string}
+            failed:
+              type: array
+              items:
+                type: object
+                properties:
+                  feed_ref: {type: string, x-resource: {type: data, id: feed}}
+                  title:    {type: string}
+                  feed_url: {type: string}
+                  error:    {type: string}
+                  failures: {type: integer}

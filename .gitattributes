@@ -1,0 +1,6 @@
+# Git must never normalize these; a PDF with its bytes rewritten is not a PDF.
+*.pdf binary
+*.xlsx binary
+*.png binary
+*.pptx binary
+*.docx binary

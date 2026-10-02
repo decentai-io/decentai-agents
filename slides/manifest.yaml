@@ -1,0 +1,263 @@
+# The Presentations agent — reads the PowerPoint decks people upload and
+# produces new ones from an outline, in the company's own template when
+# one is given.
+#
+# Supported input: PowerPoint (.pptx). A slide whose content is only a
+# picture has no text to read and is reported as empty, by number, never
+# skipped in silence. Speaker notes are read with the slide, because what
+# a deck means is usually in the notes. Every produced deck is read back
+# before it is returned.
+
+schema_version: "1.0"
+
+agent:
+  id: slides
+  name: Presentations
+  version: "0.1.2"
+  description: >
+    Reads the PowerPoint decks you upload, slide by slide, with the
+    speaker notes and the tables, and produces new decks from an
+    outline — in your own template's design when you give one.
+  tags:
+    - presentations
+    - powerpoint
+    - slides
+    - productivity
+  examples:
+    - title: "Read a deck"
+      prompt: "Read the attached deck and tell me what each slide says, speaker notes included."
+    - title: "Summarize for a board"
+      prompt: "Summarize this 40-slide deck into the five points that matter, with the slide numbers."
+    - title: "Produce a deck"
+      prompt: "Turn these findings into a 6-slide deck using the attached company template."
+  instructions: >
+    Use this agent when the user attached a PowerPoint deck or wants one
+    produced. Start with read.inspect to learn how many slides there are
+    and which have no text; then read.text for what the slides and the
+    notes say, by slide. Quote a slide with its number. A slide listed in
+    empty_slides carries only pictures — say so rather than describing
+    what you cannot see. To make a deck, give produce.pptx a title and
+    the slides as data, each with its bullets and optionally a table and
+    speaker notes; never retype figures from memory, take them from a
+    read or a stored result. Pass template_ref when the user attached a
+    company template: the deck is then built in that template's design,
+    and the template's own slides are not carried over. Give the user
+    the file_ref of what was produced. produce.fill_template reports the
+    placeholders it could not fill; ask for those values rather than
+    guessing.
+
+implementation:
+  entrypoint: agent:SlidesAgent
+  dependencies:
+    - python-pptx>=1.0,<2
+
+# Where it connects: nowhere. Everything it works on is handed to it
+# by the platform, and everything it makes is handed back.
+network:
+  hosts: []
+
+resources:
+  data:
+    - id: output
+      label: Produced Deck
+      description: A deck this agent produced, and what it was made from.
+      binding: {cardinality: many, required: false}
+      fields:
+        - {name: filename, label: Filename, type: string, storage: keys, required: true}
+        - {name: file_ref, label: File,     type: string, storage: keys, required: true}
+        - {name: slides,   label: Slides,   type: number, storage: keys, required: true}
+        - {name: purpose,  label: Purpose,  type: string, storage: keys, required: false}
+        - {name: template, label: Template, type: string, storage: keys, required: false}
+
+  files:
+    - id: source
+      label: Source Deck
+      description: A deck to read or use as a template — uploaded by a person or saved by another agent.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        max_size_mb: 25  # the platform's upload limit
+    - id: deck
+      label: Produced Deck
+      description: PowerPoint files this agent produced.
+      binding: {cardinality: many, required: false}
+      constraints:
+        mime_types:
+          - application/vnd.openxmlformats-officedocument.presentationml.presentation
+        max_size_mb: 25  # the platform's upload limit
+
+tools:
+  - id: read
+    name: Read
+    description: Inspects decks and reads what their slides and notes say.
+    resources:
+      files: [source]
+    functions:
+      - id: inspect
+        name: Inspect Deck
+        description: >
+          What a deck is and what can be read from it: how many slides,
+          each slide's title, the slides with no text at all (pictures
+          only — nothing to read here), whether there are speaker notes,
+          and the layouts the deck uses.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref: {type: string, x-resource: {type: file, id: source}}
+        outputs:
+          type: object
+          required: [file_ref, filename, kind, slides, titles, empty_slides, characters, has_notes]
+          properties:
+            file_ref:     {type: string}
+            filename:     {type: string}
+            kind:         {type: string, enum: [pptx, unsupported]}
+            slides:       {type: integer}
+            titles:
+              type: array
+              items:
+                type: object
+                properties:
+                  slide: {type: integer}
+                  title: {type: string}
+            empty_slides: {type: array, items: {type: integer}}
+            characters:   {type: integer}
+            has_notes:    {type: boolean}
+            layouts:      {type: array, items: {type: string}}
+            problem:      {type: string}
+
+      - id: text
+        name: Read Slides
+        description: >
+          What the slides say, one by one, from from_slide, up to
+          max_chars in total (the rest is reported as truncated — read
+          again from the next slide). Each slide comes back with its
+          title, its body text, its tables as rows, and its speaker
+          notes. A slide with no text at all is listed in empty_slides.
+        permission_level: 0
+        timeout_seconds: 60
+        resources:
+          files: {source: read}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [file_ref]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: source}}
+            from_slide: {type: integer, minimum: 1, default: 1}
+            max_chars:  {type: integer, minimum: 500, maximum: 60000, default: 20000}
+            with_notes: {type: boolean, default: true}
+        outputs:
+          type: object
+          required: [file_ref, filename, slides, truncated, empty_slides]
+          properties:
+            file_ref: {type: string}
+            filename: {type: string}
+            slides:
+              type: array
+              items:
+                type: object
+                properties:
+                  slide: {type: integer}
+                  title: {type: string}
+                  text:  {type: string}
+                  notes: {type: string}
+            truncated:    {type: boolean}
+            next_slide:   {type: integer}
+            empty_slides: {type: array, items: {type: integer}}
+
+  - id: produce
+    name: Produce
+    description: Makes PowerPoint decks from an outline, and fills templates.
+    resources:
+      files: [source, deck]
+      data:  [output]
+    functions:
+      - id: pptx
+        name: Produce Deck
+        description: >
+          A deck from a title and slides. Each slide has a title,
+          bullets, optionally a table given as table_columns (names) and
+          table_rows (a list of rows, each a list of cell strings), and
+          optionally speaker notes. Pass template_ref to build it in an
+          uploaded template's design: the template's theme, fonts and
+          layouts are used, and its own slides are left out. The file is
+          read back before it is returned.
+        permission_level: 2
+        timeout_seconds: 90
+        resources:
+          files: {source: read, deck: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [filename, title, slides]
+          properties:
+            filename:     {type: string, minLength: 1, maxLength: 120}
+            title:        {type: string, minLength: 1, maxLength: 200}
+            subtitle:     {type: string, maxLength: 300}
+            purpose:      {type: string, maxLength: 200}
+            template_ref: {type: string, x-resource: {type: file, id: source}}
+            slides:
+              type: array
+              minItems: 1
+              maxItems: 60
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  title:         {type: string, maxLength: 200}
+                  bullets:       {type: array, maxItems: 20, items: {type: string, maxLength: 500}}
+                  notes:         {type: string, maxLength: 4000}
+                  table_columns: {type: array, maxItems: 8, items: {type: string, maxLength: 80}}
+                  table_rows:    {type: array, maxItems: 40}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, verified, slides]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: deck}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            verified:   {type: boolean}
+            slides:     {type: integer}
+            templated:  {type: boolean}
+
+      - id: fill_template
+        name: Fill Deck Template
+        description: >
+          A deck template with {{placeholders}} filled from values (an
+          object of placeholder name to text), into a new file. Titles,
+          body text, table cells and speaker notes are all filled.
+          Placeholders left unfilled are listed — ask for them; nothing
+          is invented. The file is read back before it is returned.
+        permission_level: 2
+        timeout_seconds: 90
+        resources:
+          files: {source: read, deck: create}
+          data:  {output: [create]}
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [template_ref, filename, values]
+          properties:
+            template_ref: {type: string, x-resource: {type: file, id: source}}
+            filename:     {type: string, minLength: 1, maxLength: 120}
+            purpose:      {type: string, maxLength: 200}
+            values:       {type: object, additionalProperties: true}
+        outputs:
+          type: object
+          required: [file_ref, filename, output_ref, filled, unfilled, verified, slides]
+          properties:
+            file_ref:   {type: string, x-resource: {type: file, id: deck}}
+            filename:   {type: string}
+            output_ref: {type: string, x-resource: {type: data, id: output}}
+            filled:     {type: array, items: {type: string}}
+            unfilled:   {type: array, items: {type: string}}
+            verified:   {type: boolean}
+            slides:     {type: integer}
