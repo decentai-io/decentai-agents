@@ -1,8 +1,10 @@
 # The agents this repository offers.
 #
 # DecentAI reads this file without running any of the code beneath it:
-# every path is resolved inside the checkout, every manifest is validated,
-# and nothing executes until an administrator approves an agent by name.
+# every path is resolved inside the checkout, every manifest is read and
+# its id checked against the entry, and nothing executes until an
+# administrator approves an agent by name. A manifest's grammar is
+# checked when that agent is installed.
 
 schema_version: "1.0"
 
