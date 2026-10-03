@@ -119,13 +119,15 @@ worker over the real wire against the platform's simulated resources.
 
 ## Build your own
 
-Start from the agent template repository, [`decentai-agent-template`](https://github.com/decentai-io/decentai-agent-template),
+Start from the Note example in the platform's repository,
+[`examples/note/`](https://github.com/decentai-io/decentai/tree/main/examples/note),
 which is one agent that uses every feature the platform can enforce,
-with the walkthrough for copying it: the anatomy of an agent, a
-reference for every manifest key and everything the SDK gives, how the
-platform runs and confines an agent, how to try one on your own
-computer, publishing and versions, and the checklist to run before you
-ask anyone to approve it. `notebook/` here is the same
+and the walkthrough for copying it in
+[`docs/agents/`](https://github.com/decentai-io/decentai/tree/main/docs/agents):
+the anatomy of an agent, every manifest key and everything the SDK
+gives, how to try one on your own computer, publishing and versions,
+and the checklist to run before you ask anyone to approve it.
+`notebook/` here is the same
 agent at full size; the rest of this catalog is what these ideas look
 like on real work.
 
