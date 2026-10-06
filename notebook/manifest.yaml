@@ -21,7 +21,7 @@ schema_version: "1.0"
 agent:
   id: notebook
   name: Notebook
-  version: "2.0.8"
+  version: "2.0.9"
   description: >
     Your working memory across conversations. Save what was decided,
     find what you wrote last month, summarize a notebook, import or
@@ -119,7 +119,10 @@ resources:
       # `create` is the only operation a file can offer them.
       user_access: [create]
       constraints:
-        mime_types: [text/csv, application/json]
+        # What an export writes and an import reads, and the minutes
+        # the sample data ships (samples/): a slot takes what its
+        # manifest lists, the agent's own sample among it.
+        mime_types: [text/csv, application/json, text/markdown]
         max_size_mb: 25  # the platform's upload limit
 
 tools:
