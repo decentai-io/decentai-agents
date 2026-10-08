@@ -138,7 +138,7 @@ class TestTheJudge:
             return "Stop"
         executor.asker = refuse
         result, status = browse(agents, executor, "Only look: which dumbbell is under 500?", shop.url)
-        assert status == "success" and result["outcome"] == "stopped", result
+        assert status == "success" and result["outcome"] == "stopped_by_person", result
         assert "Add Adjustable dumbbell 20 kg" in result["summary"]
         assert shop.basket == [] and shop.orders == []
         assert person.asked[-1].startswith("About to press “Add Adjustable dumbbell 20 kg")

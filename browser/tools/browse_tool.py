@@ -822,8 +822,14 @@ class _Run:
             choices=["Go ahead", "Stop"])
         if answer != "Go ahead":
             self.brain.memory.did(line, "the person did not approve it")
-            return {"outcome": "stopped",
-                    "summary": f"Stopped before pressing “{words}” on {where}, as the person asked."}
+            # Their own Stop is said as that, and not as a run that
+            # merely ended: the platform ends the turn on it, where a
+            # plain "stopped" read as a result to try again
+            # (docs/agents/sdk.md). Nobody answering is the other case.
+            return {"outcome": "stopped_by_person" if answer == "Stop" else "stopped",
+                    "summary": f"Stopped before pressing “{words}” on {where}, as the person asked."
+                    if answer == "Stop" else
+                    f"Stopped before pressing “{words}” on {where}: nobody approved it."}
         self.approvals.append(words)
         return None
 

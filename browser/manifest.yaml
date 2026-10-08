@@ -145,7 +145,8 @@ tools:
           the chat and may be asked to take over. Logins go through the
           user's saved secrets; a press that cannot be taken back stops
           for approval, as does a script the agent wants to run in the
-          page. Returns the outcome (done, stopped, failed, budget), a summary,
+          page. Returns the outcome (done, stopped, stopped_by_person when
+          the user answered Stop, failed, budget), a summary,
           the records found, the steps taken, the final URL and a
           screenshot's file_ref.
         permission_level: 2
@@ -167,7 +168,7 @@ tools:
           type: object
           required: [outcome, summary, steps, final_url, records]
           properties:
-            outcome:     {type: string, enum: [done, stopped, failed, budget]}
+            outcome:     {type: string, enum: [done, stopped, stopped_by_person, failed, budget]}
             summary:     {type: string}
             steps:       {type: integer}
             final_url:   {type: string}

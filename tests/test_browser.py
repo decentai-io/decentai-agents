@@ -748,7 +748,7 @@ class TestShopping:
             return "Stop"
         executor.asker = refuse
         result, status = browse(agents, executor, "Order the dumbbell under 500", shop.url)
-        assert status == "success" and result["outcome"] == "stopped", result
+        assert status == "success" and result["outcome"] == "stopped_by_person", result
         assert "Place order" in result["summary"] and shop.orders == []
 
     def test_a_private_address_is_refused_before_the_browser_goes_there(self, agents, shop):
