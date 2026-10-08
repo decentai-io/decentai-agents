@@ -12,6 +12,7 @@ import yaml
 
 from ai_runtime.agents.environments import AgentEnvironment
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,8 +75,9 @@ def run(awaitable):
 def made(model, person=None, provider=None):
     provider = provider or InMemoryResourceProvider()
     person = person or Person()
-    executor = FunctionExecutor(provider=provider, llm=model,
-                                proposer=person.propose, credentialer=person.credential)
+    executor = FunctionExecutor(provider=provider,
+                                sinks=ChatSinks(llm=model, propose=person.propose,
+                                                credential=person.credential))
     return executor, provider, person
 
 
@@ -151,7 +153,9 @@ class TestAProgramThatDoesNotRun:
 
     def test_with_nobody_to_answer_nothing_runs(self, agents):
         provider = InMemoryResourceProvider()
-        executor = FunctionExecutor(provider=provider, llm=Model([answer(self.LEAVES_A_MARK)]))
+        executor = FunctionExecutor(
+            provider=provider,
+            sinks=ChatSinks(llm=Model([answer(self.LEAVES_A_MARK)])))
         result, status = program(agents, executor, {"goal": "Leave a mark."})
         assert status == "success" and result["outcome"] == "unanswered", result
         assert provider.files.get("code_runner__output", {}) == {}

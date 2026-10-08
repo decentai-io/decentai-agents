@@ -13,6 +13,7 @@ import re
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import VISITOR
@@ -44,9 +45,10 @@ class Scripted(Shopper):
 def scripted(shop, steps, asker=None, proposer=None):
     provider = InMemoryResourceProvider()
     mind, person = Scripted(steps), Person(shop)
-    executor = FunctionExecutor(provider=provider, llm=mind, asker=asker or person.ask,
-                                credentialer=person.credential, progress_sink=_progress,
-                                proposer=proposer)
+    executor = FunctionExecutor(provider=provider,
+                                sinks=ChatSinks(llm=mind, ask=asker or person.ask,
+                                                credential=person.credential,
+                                                progress=_progress, propose=proposer))
     return executor, provider, mind, person
 
 
@@ -136,7 +138,7 @@ class TestTheJudge:
         async def refuse(question, choices, source, expects=""):
             person.asked.append(question)
             return "Stop"
-        executor.asker = refuse
+        executor.sinks.ask = refuse
         result, status = browse(agents, executor, "Only look: which dumbbell is under 500?", shop.url)
         assert status == "success" and result["outcome"] == "stopped_by_person", result
         assert "Add Adjustable dumbbell 20 kg" in result["summary"]

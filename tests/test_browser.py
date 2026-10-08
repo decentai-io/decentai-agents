@@ -15,6 +15,7 @@ import re
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import ACCOUNT, PASSWORD, ShopSite
@@ -166,8 +167,10 @@ def make(shop, provider=None):
     provider = provider or InMemoryResourceProvider()
     mind = Shopper()
     person = Person(shop)
-    executor = FunctionExecutor(provider=provider, llm=mind, asker=person.ask,
-                                credentialer=person.credential, progress_sink=_progress)
+    executor = FunctionExecutor(provider=provider,
+                                sinks=ChatSinks(llm=mind, ask=person.ask,
+                                                credential=person.credential,
+                                                progress=_progress))
     return executor, provider, mind, person
 
 
@@ -252,8 +255,10 @@ class Vault:
 class TestSigningIn:
     def signer(self, mind, vault):
         provider = InMemoryResourceProvider()
-        executor = FunctionExecutor(provider=provider, llm=mind, asker=vault.ask,
-                                    credentialer=vault.credential, progress_sink=_progress)
+        executor = FunctionExecutor(provider=provider,
+                                    sinks=ChatSinks(llm=mind, ask=vault.ask,
+                                                    credential=vault.credential,
+                                                    progress=_progress))
         return executor, provider
 
     def test_a_field_is_named_by_what_the_form_says_it_is(self):
@@ -350,8 +355,10 @@ class TestAnUnreadableAnswer:
             return "I would click the shop link, I think."
 
         person = Person(shop)
-        executor = FunctionExecutor(provider=provider, llm=mumbling, asker=person.ask,
-                                    credentialer=person.credential, progress_sink=_progress)
+        executor = FunctionExecutor(provider=provider,
+                                    sinks=ChatSinks(llm=mumbling, ask=person.ask,
+                                                    credential=person.credential,
+                                                    progress=_progress))
         result, status = browse(agents, executor, "Buy a dumbbell", shop.url, max_steps=30)
         assert status == "success", result
         assert result["outcome"] == "failed"
@@ -430,9 +437,12 @@ class TestShopping:
         runs report, not by looking inside."""
         executor, provider, mind, person = make(shop)
         executor.conversation = "chat_one"
-        other = FunctionExecutor(provider=provider, llm=mind, asker=person.ask,
-                                 credentialer=person.credential, progress_sink=_progress,
-                                 workers=executor._pool(), conversation="chat_two")
+        other = FunctionExecutor(provider=provider,
+                                 workers=executor._pool(),
+                                 conversation="chat_two",
+                                 sinks=ChatSinks(llm=mind, ask=person.ask,
+                                                 credential=person.credential,
+                                                 progress=_progress))
 
         async def scenario():
             # One loop, as production has: a new loop would mean a new
@@ -469,7 +479,7 @@ class TestShopping:
             await _progress(text, source)
             if text == "Showing the browser":
                 seen["call_id"] = str(source.get("call_id") or "")
-        executor.progress_sink = progress
+        executor.sinks.progress = progress
 
         async def scenario():
             watching = asyncio.ensure_future(executor.invoke(
@@ -530,7 +540,7 @@ class TestShopping:
             await _progress(text, source)
             if text == "Showing the browser":
                 seen["call_id"] = str(source.get("call_id") or "")
-        executor.progress_sink = progress
+        executor.sinks.progress = progress
 
         def typed(text):
             return [{"type": "key", "action": "down", "key": ch, "text": ch} for ch in text]
@@ -583,16 +593,19 @@ class TestShopping:
         executor.conversation = "chat_a"
         # One pool, hence one worker and one registry of browsers, for
         # both chats — as one organization's chats share in production.
-        other = FunctionExecutor(provider=provider, llm=mind, asker=person.ask,
-                                 credentialer=person.credential, progress_sink=_progress,
-                                 workers=executor._pool(), conversation="chat_b")
+        other = FunctionExecutor(provider=provider,
+                                 workers=executor._pool(),
+                                 conversation="chat_b",
+                                 sinks=ChatSinks(llm=mind, ask=person.ask,
+                                                 credential=person.credential,
+                                                 progress=_progress))
         seen = {}
 
         async def progress(text, source):
             await _progress(text, source)
             if text == "Showing the browser":
                 seen["call_id"] = str(source.get("call_id") or "")
-        executor.progress_sink = progress
+        executor.sinks.progress = progress
 
         async def scenario():
             watching = asyncio.ensure_future(executor.invoke(
@@ -624,7 +637,7 @@ class TestShopping:
             seen["progress"].append(text)
             if text == "Showing the browser":
                 seen["call_id"] = str(source.get("call_id") or "")
-        executor.progress_sink = progress
+        executor.sinks.progress = progress
 
         async def scenario():
             watching = asyncio.ensure_future(executor.invoke(
@@ -732,7 +745,7 @@ class TestShopping:
                     ])
                 asyncio.get_running_loop().create_task(hand_back())
 
-        executor.progress_sink = progress
+        executor.sinks.progress = progress
         result, status = browse(agents, executor, "Put the dumbbell under 500 in my basket and order it", shop.url)
         assert status == "success" and result["outcome"] == "done", result
         assert seen["steered"]
@@ -746,7 +759,7 @@ class TestShopping:
         async def refuse(question, choices, source, expects=""):
             person.asked.append(question)
             return "Stop"
-        executor.asker = refuse
+        executor.sinks.ask = refuse
         result, status = browse(agents, executor, "Order the dumbbell under 500", shop.url)
         assert status == "success" and result["outcome"] == "stopped_by_person", result
         assert "Place order" in result["summary"] and shop.orders == []

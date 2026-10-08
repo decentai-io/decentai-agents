@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 NOTES = """Ops meeting, 7 September 2026. Present: Sami, Dana, Omar.
@@ -24,7 +25,7 @@ def run(awaitable):
 
 def make(llm=None):
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, llm=llm), provider
+    return FunctionExecutor(provider=provider, sinks=ChatSinks(llm=llm)), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):

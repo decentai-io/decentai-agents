@@ -9,6 +9,7 @@ import json
 from openpyxl import load_workbook
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 RECEIPTS = {
@@ -70,7 +71,7 @@ def run(awaitable):
 
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, llm=model), provider
+    return FunctionExecutor(provider=provider, sinks=ChatSinks(llm=model)), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):

@@ -7,6 +7,7 @@ import json
 from datetime import date, timedelta
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 TODAY = date.today()
@@ -73,7 +74,8 @@ def run(awaitable):
 
 def make(asker=None):
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, llm=model, asker=asker), provider
+    sinks = ChatSinks(llm=model, ask=asker)
+    return FunctionExecutor(provider=provider, sinks=sinks), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):

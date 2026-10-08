@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,7 +181,7 @@ def test_summarize_thinks_with_the_chats_model(agents):
         asked.append((messages, max_tokens))
         return "Two notes about the handoff, one urgent."
 
-    executor = FunctionExecutor(provider=provider, llm=model)
+    executor = FunctionExecutor(provider=provider, sinks=ChatSinks(llm=model))
 
     async def scenario():
         for title, priority in (("Handoff", 1), ("Follow up", 3)):
@@ -203,9 +204,10 @@ def test_summarize_thinks_with_the_chats_model(agents):
 def test_a_function_without_llm_cannot_ask_for_the_model(agents):
     """find never declared llm, so even with a model wired in the
     executor gives it none — and it does not need one."""
-    executor = FunctionExecutor(provider=InMemoryResourceProvider(),
-                                llm=lambda *a, **k: (_ for _ in ()).throw(
-                                    AssertionError("must not be called")))
+    executor = FunctionExecutor(
+            provider=InMemoryResourceProvider(),
+            sinks=ChatSinks(llm=lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("must not be called"))))
     found, status = run(executor.invoke(
         agents["notebook"], "notebook.note.find", {"notebook": "work"}))
     assert status == "success"
