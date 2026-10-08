@@ -95,10 +95,16 @@ async def drive(call, driver, until, idle_interval: float = HANDOFF_FRAME_SECOND
     pictures = asyncio.get_running_loop().create_task(frames())
     try:
         while True:
-            why = until()
-            if why:
-                return why, trail
-            events = await call.screen.wait_input(INPUT_WAIT_SECONDS)
+            # What is already waiting is the person's, and reaches the
+            # page before it is asked whether they still hold it: a
+            # take, a few actions and a release can all arrive inside
+            # one of the run's steps.
+            events = call.screen.inputs()
+            if not events:
+                why = until()
+                if why:
+                    return why, trail
+                events = await call.screen.wait_input(INPUT_WAIT_SECONDS)
             if events and (may_drive is None or may_drive()):
                 try:
                     trail += await driver.dispatch(events)
@@ -593,7 +599,11 @@ class _Run:
             # The person may speak, or take the browser, at any step.
             for text in self.call.screen.said():
                 self.brain.hear(text)
-            if self.call.screen.taken:
+            # ...and may have handed it back already, inside the step
+            # before this one: that is still a take, and what they did
+            # is still told.
+            took = getattr(self.call.screen, "took", lambda: False)()
+            if took or self.call.screen.taken:
                 await self.yield_to_person()
             snapshot = await self.driver.snapshot()
             self.last = snapshot
