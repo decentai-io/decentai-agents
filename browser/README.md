@@ -50,8 +50,8 @@ not one JSON object — and three such replies in a row end the run.
 
 | Function | Level | What it does |
 |---|---|---|
-| `browse.run` | 2 | Does what the goal says from `start_url`, up to `max_steps` (60). Returns the outcome (`done`, `stopped`, `failed`, `budget`), a summary, the records found, the steps taken, the final URL, a screenshot's `file_ref`, what was approved, how many handoffs, and any downloads |
-| `browse.screenshot` | 0 | Opens a page and returns a screenshot as a file, with its title and final URL |
+| `browse.run` | 2 | Does what the goal says from `start_url`, up to `max_steps` (60). Returns the outcome (`done`, `stopped`, `stopped_by_person` when the user answered Stop, `failed`, `budget`), a summary, the records found, the steps taken, the final URL, a screenshot's `file_ref`, what was approved, how many handoffs, and any downloads |
+| `browse.screenshot` | 2 | Opens a page and returns a screenshot as a file, with its title and final URL |
 
 ## The moments that are the person's
 

@@ -18,7 +18,7 @@ schema_version: "1.0"
 agent:
   id: browser
   name: Browser
-  version: "0.4.3"
+  version: "0.4.4"
   description: >
     Drives a real web browser to do what you ask on any site — the
     sites nothing else covers: prefer a dedicated agent when one is
@@ -219,7 +219,10 @@ tools:
           nothing streams to the chat. Only when the user asks for a
           screenshot of an address; every other request about a site is
           run.
-        permission_level: 0
+        # The level of run, and not below it: it opens the same page,
+        # and at 0 it was a way to visit an address the user had just
+        # refused a run on, with no card.
+        permission_level: 2
         timeout_seconds: 120
         resources:
           files: {capture: [create]}

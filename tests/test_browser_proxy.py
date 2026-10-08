@@ -91,7 +91,8 @@ class TestTheBrowser:
         executor, provider, _, _ = make(shop)
         result, status = run(executor.invoke(
             agents["browser"], "browser.browse.screenshot",
-            {"url": f"http://shop.sidra.example:{port_of(shop)}/"}))
+            {"url": f"http://shop.sidra.example:{port_of(shop)}/"},
+            chat_level=2))
         assert status == "success", result
         assert result["title"] == "Sidra Fitness" and result["file_ref"]
         assert proxy.refusals == 0
@@ -102,7 +103,8 @@ class TestTheBrowser:
         proxy.admitted([])
         executor, provider, _, _ = make(shop)
         result, status = run(executor.invoke(
-            agents["browser"], "browser.browse.screenshot", {"url": shop.url}))
+            agents["browser"], "browser.browse.screenshot", {"url": shop.url},
+            chat_level=2))
         assert status == "error" or "cannot be visited" in str(result), result
         assert "file_ref" not in result
         assert proxy.refusals >= 1

@@ -381,7 +381,7 @@ class TestThePackage:
     def test_a_screenshot_is_a_file(self, agents, shop):
         executor, provider, _, _ = make(shop)
         result, status = run(executor.invoke(agents["browser"], "browser.browse.screenshot",
-                                             {"url": shop.url}))
+                                             {"url": shop.url}, chat_level=2))
         assert status == "success", result
         assert result["title"] == "Sidra Fitness" and result["file_ref"]
         [stored] = provider.files["browser__capture"].values()
