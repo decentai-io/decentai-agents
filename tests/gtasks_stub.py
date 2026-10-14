@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
+from tests.conftest import stands_for
+
 PAGE_CAP = 3        # the real cap is 100; a small one proves paging is followed
 
 
@@ -259,7 +261,7 @@ class TasksStub:
     @property
     def url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return stands_for("tasks.googleapis.com", self._server)
 
     def secret(self, access_token: str = "at-1") -> Dict[str, Any]:
         """The credential as the platform hands it to the agent: the

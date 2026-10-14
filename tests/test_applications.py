@@ -2,12 +2,12 @@
 one step at a time, every answer and document checked as it arrives,
 the record the truth, submission the person's own step. The model is
 scripted; the person is a scripted asker."""
-import asyncio
 import json
 from datetime import date, timedelta
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 TODAY = date.today()
@@ -68,14 +68,10 @@ async def model(messages, max_tokens=None, images=None):
 model.pictures = []
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make(asker=None):
     provider = InMemoryResourceProvider()
     sinks = ChatSinks(llm=model, ask=asker)
-    return FunctionExecutor(provider=provider, sinks=sinks), provider
+    return FunctionExecutor(workers(), provider=provider, sinks=sinks), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -107,8 +103,9 @@ class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
         from ai_runtime.agents.workers import WorkerHandle
         agent = agents["applications"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_forms_are_listed_with_their_steps(self, agents):
         ex, _ = make()

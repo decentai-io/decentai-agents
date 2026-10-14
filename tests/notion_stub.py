@@ -22,6 +22,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
+from tests.conftest import stands_for
+
 VERSION = "2022-06-28"
 TOKEN = "at-1"
 
@@ -453,7 +455,7 @@ class NotionStub:
     @property
     def url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return stands_for("api.notion.com", self._server)
 
     def secret(self, access_token: str = TOKEN) -> Dict[str, Any]:
         """The credential as the platform hands it to the agent."""

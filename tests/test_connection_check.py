@@ -8,14 +8,15 @@ verdict of an agent that is held all the way is proved where workers
 are confined, in the runtime's image.
 """
 
-import asyncio
 import json
 import socket
 
 import pytest
 import yaml
 
+from ai_runtime.agents.confinement import WorkerPlace
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.conftest import ROOT
@@ -24,12 +25,8 @@ from tests.web_stub import web  # noqa: F401
 DECLARED = "example.com"
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def invoke(agents, name, inputs=None):
-    executor = FunctionExecutor(provider=InMemoryResourceProvider())
+    executor = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
     return run(executor.invoke(
         agents["connection_check"], f"connection_check.check.{name}",
         inputs or {}, chat_level=0))
@@ -54,8 +51,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["connection_check"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_declares_one_host_and_the_check_is_measured_against_it(self, agents):
         manifest = yaml.safe_load(
@@ -77,7 +75,8 @@ class TestWhereNothingHoldsIt:
 
     @pytest.fixture
     def machine(self, web, monkeypatch):
-        monkeypatch.delenv("DECENTAI_PROXY", raising=False)
+        # The worker is pointed at no proxy.
+        monkeypatch.setattr(WorkerPlace, "proxy_address", lambda self: "")
         port = port_of(web)
         monkeypatch.setenv("DECENTAI_AGENT_CONNECTION_CHECK_TEST", json.dumps({
             "port": port, "direct": f"127.0.0.1:{port}", "name": "localhost",
@@ -120,28 +119,19 @@ class TestBehindThePlatformsProxy:
 
     @pytest.fixture
     def proxy(self, web, monkeypatch):
+        """The test's own confinement's proxy, which the worker is
+        pointed at with a pass for what the manifest declared."""
         from ai_runtime.agents.egress import EgressProxy
 
         port, closed = port_of(web), closed_port()
         monkeypatch.setattr(
-            EgressProxy, "resolver",
-            staticmethod(lambda host, _port: ["127.0.0.1"]))
-        monkeypatch.setattr(
             EgressProxy, "PORTS_OF_A_NAMED_HOST",
             (*EgressProxy.PORTS_OF_A_NAMED_HOST, port, closed))
-        found = EgressProxy(0, allow_loopback=True)
-        assert found.start() == []
-        manifest = yaml.safe_load(
-            (ROOT / "connection_check" / "manifest.yaml").read_text(encoding="utf-8"))
-        monkeypatch.setenv("DECENTAI_PROXY", found.address(found.admit(
-            "Connection Check", {"declared": True, "any": False,
-                                 "hosts": manifest["network"]["hosts"],
-                                 "from_secrets": []})))
+        found = confinement().proxy
         monkeypatch.setenv("DECENTAI_AGENT_CONNECTION_CHECK_TEST", json.dumps({
             "port": port, "direct": f"127.0.0.1:{port}", "name": "localhost"}))
         found.port_of_the_site, found.closed_port = port, closed
-        yield found
-        found.stop()
+        return found
 
     def test_the_host_it_declared_is_reached(self, agents, proxy):
         result, status = invoke(agents, "reach", {"address": DECLARED})
@@ -192,8 +182,9 @@ class TestBehindThePlatformsProxy:
         assert result["verdict"].startswith("Partly held.")
 
     def test_a_pass_nobody_gave_opens_nothing(self, agents, proxy, monkeypatch):
-        monkeypatch.setenv(
-            "DECENTAI_PROXY", f"http://worker:not-a-pass@127.0.0.1:{proxy.port}")
+        monkeypatch.setattr(
+            WorkerPlace, "proxy_address",
+            lambda self: f"http://worker:not-a-pass@127.0.0.1:{proxy.port}")
         result, _ = invoke(agents, "reach", {"address": DECLARED})
         assert result["outcome"] == "refused"
         assert "does not know this worker" in result["reason"]

@@ -3,7 +3,6 @@ agent produces itself (Word and PDF), plain text, and a hand-written
 one-page PDF with no text layer — a scan, as far as a reader can tell.
 """
 
-import asyncio
 import base64
 import json
 
@@ -11,6 +10,7 @@ import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 def scanned_pdf() -> bytes:
@@ -63,13 +63,9 @@ QUOTE_B = {
 }
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make(llm=None):
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, sinks=ChatSinks(llm=llm)), provider
+    return FunctionExecutor(workers(), provider=provider, sinks=ChatSinks(llm=llm)), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=2):
@@ -98,8 +94,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["documents"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
 
 class TestProducing:

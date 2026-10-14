@@ -3,20 +3,16 @@ worker process, over the worker protocol, against the platform's
 simulated resources. Each test pins one feature the manifest declares.
 """
 
-import asyncio
 from pathlib import Path
 
 import yaml
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 def manifest():
@@ -38,8 +34,9 @@ def test_the_catalog_offers_one_agent_that_implements_its_manifest(agents):
 
     assert set(agents) == {"notebook", "gmail", "google_calendar", "google_drive", "google_sheets", "google_forms", "google_tasks", "microsoft_calendar", "microsoft_todo", "outlook", "onedrive", "excel_online", "microsoft_forms", "dropbox", "box", "teams", "slack", "notion", "documents", "tasks", "todoist", "timesheets", "sheets", "expenses", "places", "google_docs", "word_online", "web_reader", "web_watch", "browser", "feeds", "applications", "slides", "json_data", "connection_check", "mail", "code_runner"}
     agent = agents["notebook"]
-    errors = WorkerHandle.probe(
-        agent.environment.python, agent.folder, agent.manifest.document)
+    errors = run(WorkerHandle.probe(
+        agent.environment.python, agent.folder, agent.manifest.document,
+        confinement().verification_place()))
     assert errors == [], errors
 
 
@@ -63,7 +60,7 @@ def test_dependencies_live_in_the_agents_own_environment(agents):
     """titlecase and humanize are installed into the agent's venv and
     used by the code — a lowercase title comes back cased."""
     provider = InMemoryResourceProvider()
-    executor = FunctionExecutor(provider=provider)
+    executor = FunctionExecutor(workers(), provider=provider)
 
     async def scenario():
         saved, status = await executor.invoke(
@@ -81,7 +78,7 @@ def test_dependencies_live_in_the_agents_own_environment(agents):
 
 def test_json_round_trip_preserves_priority_and_content(agents):
     provider = InMemoryResourceProvider()
-    executor = FunctionExecutor(provider=provider)
+    executor = FunctionExecutor(workers(), provider=provider)
 
     async def scenario():
         saved, status = await executor.invoke(
@@ -111,7 +108,7 @@ def test_json_round_trip_preserves_priority_and_content(agents):
 
 def test_a_bad_import_creates_no_notes(agents):
     provider = InMemoryResourceProvider()
-    executor = FunctionExecutor(provider=provider)
+    executor = FunctionExecutor(workers(), provider=provider)
 
     async def scenario():
         uploaded = await provider.create_file(
@@ -137,7 +134,7 @@ def test_the_secret_reaches_only_the_functions_that_declared_it(agents):
             "api_token": "test-token",
         }
     })
-    executor = FunctionExecutor(provider=provider)
+    executor = FunctionExecutor(workers(), provider=provider)
 
     async def scenario():
         connected, status = await executor.invoke(
@@ -163,7 +160,7 @@ def test_the_level_three_push_needs_the_chats_trust(agents):
     the approval card is the chat's, never the agent's."""
     provider = InMemoryResourceProvider(secrets={
         "notebook__connection": {"base_url": "u", "api_token": "t"}})
-    executor = FunctionExecutor(provider=provider)
+    executor = FunctionExecutor(workers(), provider=provider)
     result, status = run(executor.invoke(
         agents["notebook"], "notebook.sync.push", {"notebook": "work"},
         chat_level=1))
@@ -181,7 +178,7 @@ def test_summarize_thinks_with_the_chats_model(agents):
         asked.append((messages, max_tokens))
         return "Two notes about the handoff, one urgent."
 
-    executor = FunctionExecutor(provider=provider, sinks=ChatSinks(llm=model))
+    executor = FunctionExecutor(workers(), provider=provider, sinks=ChatSinks(llm=model))
 
     async def scenario():
         for title, priority in (("Handoff", 1), ("Follow up", 3)):
@@ -205,7 +202,7 @@ def test_a_function_without_llm_cannot_ask_for_the_model(agents):
     """find never declared llm, so even with a model wired in the
     executor gives it none — and it does not need one."""
     executor = FunctionExecutor(
-            provider=InMemoryResourceProvider(),
+            workers(), provider=InMemoryResourceProvider(),
             sinks=ChatSinks(llm=lambda *a, **k: (_ for _ in ()).throw(
                 AssertionError("must not be called"))))
     found, status = run(executor.invoke(

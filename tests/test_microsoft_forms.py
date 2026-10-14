@@ -8,11 +8,10 @@ Microsoft Forms has no API, so there is no Forms stub: the responses
 are rows in an Excel table, added the way Forms adds them.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.graph_workbook_stub import GraphWorkbookStub
@@ -25,10 +24,6 @@ FEEDBACK_HEADERS = ["ID", "Start time", "Completion time", "Email", "Name", SATI
 def response(n, name, satisfied, improve):
     email = f"{name.split()[0].lower()}@harbourline.example" if name else "anonymous"
     return [n, f"9/{n}/2026 10:00", f"9/{n}/2026 10:03", email, name, satisfied, improve]
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -56,7 +51,7 @@ def graph():
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"microsoft_forms__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -74,8 +69,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["microsoft_forms"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_reads_and_watches_and_changes_nothing(self, agents):
         levels = {f"{t['id']}.{f['id']}": f["permission_level"]
@@ -98,7 +94,7 @@ class TestThePackage:
             "connected": True, "email": GraphWorkbookStub.ACCOUNT}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result = ok(invoke(agents, ex, "microsoft_forms.account.status", {}))
         assert result["connected"] is False
         assert "No Microsoft account" in result["problem"]

@@ -4,13 +4,13 @@ rating, the products bought, comments, a receipt upload and a delivery
 grid — and a few responses already in.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.gforms_stub import GoogleFormsStub
 
 ITEMS = [
@@ -38,10 +38,6 @@ ITEMS = [
 ]
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 @pytest.fixture
 def forms():
     stub = GoogleFormsStub().start()
@@ -65,7 +61,7 @@ def forms():
 def executor(forms, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"google_forms__google": forms.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -77,8 +73,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_forms"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_only_reads_google(self, agents):
         """Nothing here changes a form: reads at 0, the watch record at 1,
@@ -90,7 +87,7 @@ class TestThePackage:
                           "responses.list": 0, "responses.watch": 1, "responses.new": 1}
         _, new = agents["google_forms"].manifest.function("google_forms.responses.new")
         assert new["schedulable"] is True and not new.get("llm")
-        scopes = agents["google_forms"].manifest.resource("secrets", "google")["oauth"]["scopes"]
+        scopes = resource(agents["google_forms"].manifest, "secrets", "google")["oauth"]["scopes"]
         assert "https://www.googleapis.com/auth/forms.responses.readonly" in scopes
 
     def test_status_reports_the_account(self, agents, forms):
@@ -259,7 +256,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "google_forms.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google account" in result["problem"]

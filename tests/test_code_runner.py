@@ -3,7 +3,6 @@ really run, the chat's model scripted, the person a scripted answer to
 the code card and to a credential.
 """
 
-import asyncio
 import shutil
 from pathlib import Path
 
@@ -13,6 +12,7 @@ import yaml
 from ai_runtime.agents.environments import AgentEnvironment
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import run, workers
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,14 +68,10 @@ class Person:
         return {"token": self.token, "host": host} if self.token else None
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def made(model, person=None, provider=None):
     provider = provider or InMemoryResourceProvider()
     person = person or Person()
-    executor = FunctionExecutor(provider=provider,
+    executor = FunctionExecutor(workers(), provider=provider,
                                 sinks=ChatSinks(llm=model, propose=person.propose,
                                                 credential=person.credential))
     return executor, provider, person
@@ -154,7 +150,7 @@ class TestAProgramThatDoesNotRun:
     def test_with_nobody_to_answer_nothing_runs(self, agents):
         provider = InMemoryResourceProvider()
         executor = FunctionExecutor(
-            provider=provider,
+            workers(), provider=provider,
             sinks=ChatSinks(llm=Model([answer(self.LEAVES_A_MARK)])))
         result, status = program(agents, executor, {"goal": "Leave a mark."})
         assert status == "success" and result["outcome"] == "unanswered", result
@@ -279,13 +275,18 @@ class TestWhatAProgramNeeds:
     def test_its_packages_are_installed_by_the_platform_and_found_by_the_program(
         self, agents
     ):
-        """pip is stood in for: it leaves a module where the platform
-        told it to, and the program imports it from there."""
-        def pip(argv):
-            assert "--target" in argv and argv[-1] == "shout==1.0", argv
+        """pip is stood in for: the builder leaves a wheel, and the
+        platform's pip, handed that wheel, leaves a module where it was
+        told to; the program imports it from there."""
+        from ai_runtime.tests.fake_container import container
+
+        async def pip(argv):
+            assert "--target" in argv and argv[-1].endswith("shout-1.0-py3-none-any.whl"), argv
             target = Path(argv[argv.index("--target") + 1])
             (target / "shout.py").write_text("def loud(words):\n    return words.upper() + '!'\n")
             return 0, ""
+
+        container().leaves = {"shout-1.0-py3-none-any.whl": b"a wheel"}
 
         model = Model([answer("import shout\nprint(shout.loud('done'))\n",
                               purpose="Says done, loudly.", packages="shout==1.0")])

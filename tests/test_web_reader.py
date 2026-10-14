@@ -4,13 +4,13 @@ only reachable because the tests set the test-only variable; the
 safety tests prove what stays refused with and without it.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import declaring
 from tests.web_stub import LOOPBACK_VARIABLE, WebStub, text_pdf, web  # noqa: F401
 
 PRICING = """<!doctype html>
@@ -40,13 +40,9 @@ REPORT_PAGES = [
 ]
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=2):
@@ -58,8 +54,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["web_reader"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_levels_are_reads_and_one_save(self, agents):
         levels = {name: agents["web_reader"].manifest.function(f"web_reader.pages.{name}")[1]["permission_level"]
@@ -335,7 +332,10 @@ class TestBehindThePlatformsProxy:
     it; what this agent refuses by itself, it still refuses."""
 
     @pytest.fixture
-    def proxy(self, web, monkeypatch):
+    def proxy(self, agents, web, monkeypatch):
+        """The test's own confinement's proxy, with a lookup table of
+        its own; ``admitted`` runs the agent as if it declared these
+        hosts and no others."""
         from ai_runtime.agents.egress import EgressProxy
 
         names = {"inside.harbourline.example": ["10.0.0.5"],
@@ -343,14 +343,10 @@ class TestBehindThePlatformsProxy:
         monkeypatch.setattr(
             EgressProxy, "resolver",
             staticmethod(lambda host, port: names.get(host, ["127.0.0.1"])))
-        found = EgressProxy(0, allow_loopback=True)
-        assert found.start() == []
-        found.admitted = lambda hosts: monkeypatch.setenv(
-            "DECENTAI_PROXY", found.address(found.admit("Web Reader", {
-                "declared": True, "any": hosts == "any",
-                "hosts": [] if hosts == "any" else hosts, "from_secrets": []})))
-        yield found
-        found.stop()
+        found = confinement().proxy
+        found.admitted = lambda hosts: monkeypatch.setitem(
+            agents, "web_reader", declaring(agents["web_reader"], hosts))
+        return found
 
     def port(self, web):
         return web.url.rsplit(":", 1)[1]
@@ -402,21 +398,13 @@ class TestBehindThePlatformsProxy:
         text, quoted by Python — with double quotes when the reason
         itself holds an apostrophe, as "this machine's own address"
         does. The agent reads it either way."""
-        from ai_runtime.agents.egress import EgressProxy
-
-        strict = EgressProxy(0, allow_loopback=False)
-        assert strict.start() == []
-        try:
-            monkeypatch.setenv("DECENTAI_PROXY", strict.address(strict.admit(
-                "Web Reader", {"declared": True, "any": True, "hosts": [], "from_secrets": []})))
-            ex, _ = make()
-            result, status = invoke(agents, ex, "web_reader.pages.read", {
-                "url": "https://local.harbourline.example/admin"})
-            assert status == "error", result
-            assert result["kind"] == "forbidden", result
-            assert "own address" in result["error"], result
-        finally:
-            strict.stop()
+        monkeypatch.setattr(proxy, "allow_loopback", False)
+        ex, _ = make()
+        result, status = invoke(agents, ex, "web_reader.pages.read", {
+            "url": "https://local.harbourline.example/admin"})
+        assert status == "error", result
+        assert result["kind"] == "forbidden", result
+        assert "own address" in result["error"], result
 
     def test_an_address_written_as_one_is_refused_before_it_is_asked(
             self, agents, web, proxy):
@@ -447,14 +435,13 @@ class TestBehindThePlatformsProxy:
         assert "does not resolve" in result["error"]
 
     def test_the_pass_is_in_no_error(self, agents, web, proxy, monkeypatch):
-        import os
-
         proxy.admitted("any")
-        address = os.environ["DECENTAI_PROXY"]
-        proxy.stop()                  # nothing listens where the agent was sent
+        run(proxy.stop())             # nothing listens where the agent is sent
         ex, _ = make()
         result, status = invoke(agents, ex, "web_reader.pages.read", {
             "url": "http://www.harbourline.example/"})
+        [handle] = ex.workers._handles.values()
+        address = handle.place.proxy_address()
         assert status == "error", result
         assert address not in result["error"]
         assert address.split("@")[0].rsplit(":", 1)[1] not in result["error"]

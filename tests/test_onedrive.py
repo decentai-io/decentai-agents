@@ -4,13 +4,13 @@ Contracts, a budget workbook under Finance, a proposal draft at the top
 level, and a showroom floor plan Dana shared from her own drive.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_drive_stub import GraphDriveStub
 
 DANA = "dana@sidra.example"
@@ -19,10 +19,6 @@ BUDGET = b"PK\x03\x04 q3 budget workbook"
 PROPOSAL = b"PK\x03\x04 proposal draft"
 FLOOR_PLAN = b"%PDF-1.4\n% showroom floor plan\n"
 NOTICE = b"%PDF-1.4\n% renewal notice\n"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -39,7 +35,7 @@ def drive():
 def executor(drive, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"onedrive__microsoft": drive.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=0):
@@ -63,15 +59,16 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["onedrive"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_one_connection_serves_the_three_microsoft_agents(self, agents):
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
-        drive = agents["onedrive"].manifest.resource("secrets", "microsoft")
+        drive = resource(agents["onedrive"].manifest, "secrets", "microsoft")
         for other in ("outlook", "microsoft_calendar"):
-            theirs = agents[other].manifest.resource("secrets", "microsoft")
+            theirs = resource(agents[other].manifest, "secrets", "microsoft")
             assert strip(theirs["fields"]) == strip(drive["fields"]), other
             assert theirs["oauth"] == drive["oauth"], other
 

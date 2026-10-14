@@ -144,8 +144,8 @@ class MailStub:
     def secret(self, password: str = "") -> dict:
         return {"account": self.ACCOUNT, "password": password or self.PASSWORD,
                 "provider": "other",
-                "test_imap": f"127.0.0.1:{self.imap_port}",
-                "test_smtp": f"127.0.0.1:{self.smtp_port}"}
+                "test_imap": f"imap.sidra.example:{self.imap_port}",
+                "test_smtp": f"smtp.sidra.example:{self.smtp_port}"}
 
     # -- the servers ----------------------------------------------------------
     def start(self) -> "MailStub":

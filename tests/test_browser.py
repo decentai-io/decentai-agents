@@ -16,13 +16,10 @@ import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import ACCOUNT, PASSWORD, ShopSite
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -167,7 +164,7 @@ def make(shop, provider=None):
     provider = provider or InMemoryResourceProvider()
     mind = Shopper()
     person = Person(shop)
-    executor = FunctionExecutor(provider=provider,
+    executor = FunctionExecutor(workers(), provider=provider,
                                 sinks=ChatSinks(llm=mind, ask=person.ask,
                                                 credential=person.credential,
                                                 progress=_progress))
@@ -255,7 +252,7 @@ class Vault:
 class TestSigningIn:
     def signer(self, mind, vault):
         provider = InMemoryResourceProvider()
-        executor = FunctionExecutor(provider=provider,
+        executor = FunctionExecutor(workers(), provider=provider,
                                     sinks=ChatSinks(llm=mind, ask=vault.ask,
                                                     credential=vault.credential,
                                                     progress=_progress))
@@ -355,7 +352,7 @@ class TestAnUnreadableAnswer:
             return "I would click the shop link, I think."
 
         person = Person(shop)
-        executor = FunctionExecutor(provider=provider,
+        executor = FunctionExecutor(workers(), provider=provider,
                                     sinks=ChatSinks(llm=mumbling, ask=person.ask,
                                                     credential=person.credential,
                                                     progress=_progress))
@@ -382,8 +379,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["browser"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_a_screenshot_is_a_file(self, agents, shop):
         executor, provider, _, _ = make(shop)
@@ -437,8 +435,7 @@ class TestShopping:
         runs report, not by looking inside."""
         executor, provider, mind, person = make(shop)
         executor.conversation = "chat_one"
-        other = FunctionExecutor(provider=provider,
-                                 workers=executor._pool(),
+        other = FunctionExecutor(executor.workers, provider=provider,
                                  conversation="chat_two",
                                  sinks=ChatSinks(llm=mind, ask=person.ask,
                                                  credential=person.credential,
@@ -593,8 +590,7 @@ class TestShopping:
         executor.conversation = "chat_a"
         # One pool, hence one worker and one registry of browsers, for
         # both chats — as one organization's chats share in production.
-        other = FunctionExecutor(provider=provider,
-                                 workers=executor._pool(),
+        other = FunctionExecutor(executor.workers, provider=provider,
                                  conversation="chat_b",
                                  sinks=ChatSinks(llm=mind, ask=person.ask,
                                                  credential=person.credential,

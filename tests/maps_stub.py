@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
+from tests.conftest import stands_for
+
 KEY = "test-key"
 SPEED_KMH = {"DRIVE": 60.0, "WALK": 5.0, "BICYCLE": 15.0, "TRANSIT": 30.0}
 TRAFFIC_FACTOR = 1.25
@@ -335,6 +337,12 @@ class MapsStub:
     @property
     def url(self) -> str:
         assert self._server is not None
+        return stands_for("places.googleapis.com", self._server)
+
+    @property
+    def direct(self) -> str:
+        """The stub as this process reaches it — by address, having no
+        proxy to look the name up."""
         return f"http://127.0.0.1:{self._server.server_address[1]}"
 
     def secret(self, api_key: str = KEY) -> Dict[str, Any]:

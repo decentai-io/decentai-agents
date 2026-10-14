@@ -4,13 +4,13 @@ under Finance, a proposal draft at the top level, and a showroom floor
 plan Dana shared without it ever being added to the account's Dropbox.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.dropbox_stub import DropboxStub
 
 DANA = "dana@sidra.example"
@@ -21,10 +21,6 @@ PROPOSAL = b"PK\x03\x04 proposal draft"
 FLOOR_PLAN = b"%PDF-1.4\n% showroom floor plan\n"
 NOTICE = b"%PDF-1.4\n% renewal notice\n"
 INVOICE = b"%PDF-1.4\n% invoice INV-2209\n"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -41,7 +37,7 @@ def dropbox():
 def executor(dropbox, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"dropbox__dropbox": dropbox.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=0):
@@ -74,8 +70,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["dropbox"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_changes_the_drive_where_onedrive_does_and_watches_at_level_one(self, agents):
         """The twins keep the same contract; the change watch is extra,
@@ -89,7 +86,7 @@ class TestThePackage:
         assert new["schedulable"] is True and not new.get("llm")
 
     def test_the_secret_is_a_dropbox_sign_in_whose_identity_is_a_post(self, agents):
-        secret = agents["dropbox"].manifest.resource("secrets", "dropbox")
+        secret = resource(agents["dropbox"].manifest, "secrets", "dropbox")
         oauth = secret["oauth"]
         assert oauth["provider"] == "dropbox"
         assert oauth["authorize_params"] == {"token_access_type": "offline"}
@@ -504,7 +501,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "dropbox.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Dropbox account" in result["problem"]

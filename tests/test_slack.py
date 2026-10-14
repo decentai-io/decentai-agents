@@ -3,19 +3,15 @@ the Sidra Office Supplies workspace, with #general, #showroom, a private
 #finance, DMs with Dana and Omar, and a group DM with Omar and Priya.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.slack_stub import (DANA, DM_DANA, DM_OMAR, FINANCE, GENERAL, GROUP, ME, OMAR,
                               PRIYA, REVOKED_TOKEN, SHOWROOM, TEAM_URL, SlackStub)
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -27,7 +23,7 @@ def slack():
 
 def executor(slack, access_token="xoxp-demo"):
     provider = InMemoryResourceProvider(secrets={"slack__slack": slack.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -45,8 +41,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["slack"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_only_sending_is_level_three_and_the_clock_runs_the_watch(self, agents):
         functions = {f"{t['id']}.{f['id']}": f
@@ -58,7 +55,7 @@ class TestThePackage:
         assert functions["watch.start"]["permission_level"] == 1
 
     def test_it_signs_in_for_a_user_token(self, agents):
-        oauth = agents["slack"].manifest.resource("secrets", "slack")["oauth"]
+        oauth = resource(agents["slack"].manifest, "secrets", "slack")["oauth"]
         assert (oauth["provider"], oauth["scope_param"], oauth["scope_separator"],
                 oauth["token_path"]) == ("slack", "user_scope", ",", "authed_user")
         assert {"search:read", "chat:write", "im:history"} <= set(oauth["scopes"])
@@ -288,7 +285,7 @@ class TestTheConnection:
         assert provider.data == {} and slack.posts == []
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "slack.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Slack account" in result["problem"]

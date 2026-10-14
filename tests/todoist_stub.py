@@ -16,6 +16,8 @@ from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
+from tests.conftest import stands_for
+
 TOKEN = "tk-1"
 
 
@@ -345,7 +347,7 @@ class TodoistStub:
     @property
     def url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return stands_for("api.todoist.com", self._server)
 
     def secret(self, access_token: str = TOKEN) -> Dict[str, Any]:
         """The credential as the platform hands it to the agent: the

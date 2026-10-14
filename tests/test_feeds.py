@@ -3,9 +3,8 @@ RDF feeds served from a loopback web server that the tests add items
 to between checks. Every new item must be handed on exactly once.
 """
 
-import asyncio
-
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.web_stub import LOOPBACK_VARIABLE, WebStub, web  # noqa: F401
@@ -69,13 +68,9 @@ RELEASES = [
 ]
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -94,8 +89,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["feeds"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_new_items_is_declared_schedulable_at_level_one(self, agents):
         _, function = agents["feeds"].manifest.function("feeds.feeds.new_items")

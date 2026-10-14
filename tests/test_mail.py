@@ -3,26 +3,22 @@ over the real wire, against a loopback mail server holding fictional
 mail for Sidra Office Supplies.
 """
 
-import asyncio
 import email
 
 import pytest
 import yaml
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
-from tests.conftest import ROOT
+from tests.conftest import ROOT, declaring
 from tests.mail_stub import MailStub
 
 ME = MailStub.ACCOUNT
 SUPPLIER = "quotes@northlight-seating.example"
 CUSTOMER = "dana@harbourline.example"
 QUOTE_PDF = b"%PDF-1.4 fictional quotation " + bytes(range(256))
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 def fill(stub):
@@ -55,8 +51,13 @@ def fill(stub):
 
 
 @pytest.fixture
-def mail():
+def mail(agents, monkeypatch):
+    """The stub's servers, under the names its credential gives out,
+    on ports of their own: the agent is run as if it declared them."""
     stub = fill(MailStub().start())
+    monkeypatch.setitem(agents, "mail", declaring(agents["mail"], [
+        f"imap.sidra.example:{stub.imap_port}",
+        f"smtp.sidra.example:{stub.smtp_port}"]))
     yield stub
     stub.stop()
 
@@ -64,7 +65,7 @@ def mail():
 def executor(stub, password=""):
     provider = InMemoryResourceProvider(
         secrets={"mail__account": stub.secret(password)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs=None, chat_level=1):
@@ -81,8 +82,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["mail"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_needs_no_packages_and_declares_every_server_with_its_port(self):
         manifest = yaml.safe_load(
@@ -156,14 +158,14 @@ class TestTheAccount:
     def test_a_provider_known_by_name_is_told_where(self, agents, mail):
         provider = InMemoryResourceProvider(secrets={"mail__account": {
             **mail.secret("wrong"), "provider": "gmail"}})
-        result, _ = invoke(agents, FunctionExecutor(provider=provider),
+        result, _ = invoke(agents, FunctionExecutor(workers(), provider=provider),
                            "account.status")
         assert "myaccount.google.com/apppasswords" in result["problem"]
 
     def test_an_account_that_names_no_server(self, agents):
         provider = InMemoryResourceProvider(secrets={"mail__account": {
             "account": ME, "password": "x", "provider": "other"}})
-        result, _ = invoke(agents, FunctionExecutor(provider=provider),
+        result, _ = invoke(agents, FunctionExecutor(workers(), provider=provider),
                            "account.status")
         assert result["connected"] is False
         assert "names no mail server" in result["problem"]
@@ -178,7 +180,7 @@ class TestTheAccount:
              "keys": {"account": "work@sidra.example", "provider": "fastmail"},
              "values": second},
         ]})
-        ex = FunctionExecutor(provider=provider)
+        ex = FunctionExecutor(workers(), provider=provider)
         result, status = invoke(agents, ex, "account.list")
         assert status == "success", result
         assert [(a["account"], a["provider"], a["default"])
@@ -269,8 +271,11 @@ class TestFinding:
         assert subjects(rest) == ["New office — furniture for 20 desks"]
         assert "next_page_token" not in rest
 
-    def test_an_account_with_an_archive_is_searched_there(self, agents):
+    def test_an_account_with_an_archive_is_searched_there(self, agents, monkeypatch):
         stub = fill(MailStub(archive=True).start())
+        monkeypatch.setitem(agents, "mail", declaring(agents["mail"], [
+            f"imap.sidra.example:{stub.imap_port}",
+            f"smtp.sidra.example:{stub.smtp_port}"]))
         try:
             ex, _ = executor(stub)
             result, status = invoke(agents, ex, "search.find", {"subject": "Q-2041"})
@@ -634,26 +639,20 @@ class TestBehindThePlatformsProxy:
     passes through it is the agent's and the mail server's."""
 
     @pytest.fixture
-    def proxy(self, mail, monkeypatch):
-        from ai_runtime.agents.egress import EgressProxy
-
-        monkeypatch.setattr(EgressProxy, "resolver",
-                            staticmethod(lambda host, port: ["127.0.0.1"]))
-        found = EgressProxy(0, allow_loopback=True)
-        assert found.start() == []
-        found.admitted = lambda hosts: monkeypatch.setenv(
-            "DECENTAI_PROXY", found.address(found.admit("Mail", {
-                "declared": True, "any": False, "hosts": hosts,
-                "from_secrets": []})))
-        yield found
-        found.stop()
+    def proxy(self, agents, mail, monkeypatch):
+        """The test's own confinement's proxy; ``admitted`` runs the
+        agent as if it declared these hosts and no others."""
+        found = confinement().proxy
+        found.admitted = lambda hosts: monkeypatch.setitem(
+            agents, "mail", declaring(agents["mail"], hosts))
+        return found
 
     def by_name(self, mail):
         secret = {**mail.secret(),
                   "test_imap": f"imap.sidra.example:{mail.imap_port}",
                   "test_smtp": f"smtp.sidra.example:{mail.smtp_port}"}
         provider = InMemoryResourceProvider(secrets={"mail__account": secret})
-        return FunctionExecutor(provider=provider), provider
+        return FunctionExecutor(workers(), provider=provider), provider
 
     def test_mail_is_read_and_sent_through_it(self, agents, mail, proxy):
         proxy.admitted([f"imap.sidra.example:{mail.imap_port}",

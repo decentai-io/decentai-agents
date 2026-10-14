@@ -4,11 +4,10 @@ watch must report a change exactly once, and a page that cannot be
 fetched must never wake anyone.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.web_stub import LOOPBACK_VARIABLE, WebStub, web  # noqa: F401
@@ -28,13 +27,9 @@ def news(*items: str) -> str:
     return f"<html><body><h1>Riverside Book Fair news</h1><ul>{rows}</ul></body></html>"
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -50,8 +45,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["web_watch"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_changed_is_declared_schedulable_at_level_one(self, agents):
         _, function = agents["web_watch"].manifest.function("web_watch.watches.changed")

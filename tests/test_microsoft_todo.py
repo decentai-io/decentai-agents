@@ -4,18 +4,14 @@ fictional tasks for Sidra Office Supplies. The same cases as the Google
 Tasks agent's suite: the contracts are the same, the wire is not.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_todo_stub import GraphTodoStub
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -42,7 +38,7 @@ def todo():
 def executor(todo, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"microsoft_todo__microsoft": todo.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -54,13 +50,14 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["microsoft_todo"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_secret_has_the_same_shape_as_outlooks(self, agents):
         """One saved Microsoft credential must be grantable to both."""
-        mail = agents["outlook"].manifest.resource("secrets", "microsoft")["fields"]
-        todo = agents["microsoft_todo"].manifest.resource("secrets", "microsoft")["fields"]
+        mail = resource(agents["outlook"].manifest, "secrets", "microsoft")["fields"]
+        todo = resource(agents["microsoft_todo"].manifest, "secrets", "microsoft")["fields"]
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
         assert strip(mail) == strip(todo)
@@ -329,7 +326,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "microsoft_todo.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Microsoft account" in result["problem"]

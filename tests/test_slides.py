@@ -3,11 +3,10 @@ the agent produced itself, so a test that reads proves what a test that
 writes claimed.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 DECK = {
@@ -30,13 +29,9 @@ DECK = {
 }
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=2):
@@ -63,8 +58,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["slides"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
 
 class TestProducing:

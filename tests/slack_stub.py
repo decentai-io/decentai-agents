@@ -22,6 +22,8 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
+from tests.conftest import stands_for
+
 TEAM_URL = "https://sidra-office.slack.com/"
 ME = "U0DEMO"
 DANA = "U0DANA"
@@ -305,7 +307,7 @@ class SlackStub:
     @property
     def url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return stands_for("slack.com", self._server)
 
     def secret(self, access_token: str = GOOD_TOKEN) -> Dict[str, Any]:
         """The credential as the platform hands it to the agent."""

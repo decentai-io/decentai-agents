@@ -14,6 +14,7 @@ import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import VISITOR
@@ -45,7 +46,7 @@ class Scripted(Shopper):
 def scripted(shop, steps, asker=None, proposer=None):
     provider = InMemoryResourceProvider()
     mind, person = Scripted(steps), Person(shop)
-    executor = FunctionExecutor(provider=provider,
+    executor = FunctionExecutor(workers(), provider=provider,
                                 sinks=ChatSinks(llm=mind, ask=asker or person.ask,
                                                 credential=person.credential,
                                                 progress=_progress, propose=proposer))

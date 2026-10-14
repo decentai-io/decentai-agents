@@ -2,7 +2,6 @@
 Sidra Office Supplies — text receipts, one photo, one duplicate, one over the
 meal allowance, one in another currency — and the company policy."""
 
-import asyncio
 import io
 import json
 
@@ -10,6 +9,7 @@ from openpyxl import load_workbook
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 RECEIPTS = {
@@ -65,13 +65,9 @@ async def model(messages, max_tokens=None):
     return "{}"
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, sinks=ChatSinks(llm=model)), provider
+    return FunctionExecutor(workers(), provider=provider, sinks=ChatSinks(llm=model)), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -98,8 +94,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["expenses"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
 
 class TestReceipts:

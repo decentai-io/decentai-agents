@@ -4,13 +4,13 @@ responses to a workshop sign-up form, and a supplier price list with a
 cell someone pasted a whole email into.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.gsheets_stub import GoogleSheetsStub
 
 ORDERS = [["Date", "Customer", "Item", "Qty", "Total"],
@@ -20,10 +20,6 @@ SIGNUPS = [["Timestamp", "Name", "Email", "Session"],
            ["2026-09-08 09:12:00", "Dana Haddad", "dana@sidra.example", "Morning"],
            ["2026-09-08 11:40:00", "Omar Saleh", "omar@harbourline.example", "Afternoon"]]
 LONG_NOTE = "Prices valid until the end of the quarter. " * 40
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -45,7 +41,7 @@ def sheets():
 def executor(sheets, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"google_sheets__google": sheets.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -57,14 +53,15 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_sheets"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_asks_google_for_what_the_forms_agent_asks(self, agents):
         """One connected account is granted to every Google agent, so the
         new ones ask for the identical scope list."""
-        sheets = agents["google_sheets"].manifest.resource("secrets", "google")
-        forms = agents["google_forms"].manifest.resource("secrets", "google")
+        sheets = resource(agents["google_sheets"].manifest, "secrets", "google")
+        forms = resource(agents["google_forms"].manifest, "secrets", "google")
         assert sheets["oauth"] == forms["oauth"]
         assert sheets["fields"] == forms["fields"]
         assert "https://www.googleapis.com/auth/spreadsheets" in sheets["oauth"]["scopes"]
@@ -338,7 +335,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "google_sheets.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google account" in result["problem"]

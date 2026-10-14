@@ -3,20 +3,16 @@ a one-to-one chat with Dana, the Ops group chat with Omar and Priya,
 and the Sidra Office team with its General and Showroom channels.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_teams_stub import DM_DANA, GENERAL, OPS, SHOWROOM, TEAM, GraphTeamsStub
 
 DANA = "dana@sidra.example"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -28,7 +24,7 @@ def graph():
 
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(secrets={"teams__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=0):
@@ -46,22 +42,23 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["teams"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_one_connection_serves_the_four_microsoft_agents(self, agents):
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
-        teams = agents["teams"].manifest.resource("secrets", "microsoft")
+        teams = resource(agents["teams"].manifest, "secrets", "microsoft")
         for other in ("outlook", "microsoft_calendar", "onedrive"):
-            theirs = agents[other].manifest.resource("secrets", "microsoft")
+            theirs = resource(agents[other].manifest, "secrets", "microsoft")
             assert strip(theirs["fields"]) == strip(teams["fields"]), other
             assert theirs["oauth"] == teams["oauth"], other
 
     def test_it_asks_for_nothing_an_administrator_must_grant(self, agents):
         """Reading channel messages would need admin consent for the one
         consent all four agents share; it is left out on purpose."""
-        scopes = agents["teams"].manifest.resource("secrets", "microsoft")["oauth"]["scopes"]
+        scopes = resource(agents["teams"].manifest, "secrets", "microsoft")["oauth"]["scopes"]
         assert "ChannelMessage.Read.All" not in scopes
         assert {"Chat.ReadWrite", "ChannelMessage.Send"} <= set(scopes)
 

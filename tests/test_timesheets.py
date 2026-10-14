@@ -3,26 +3,22 @@ Office Supplies, and her calendar for the week of 7 September 2026 as
 the calendar agents list it (Dubai time).
 """
 
-import asyncio
 import io
 
 import pytest
 from openpyxl import load_workbook
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 TZ = "+04:00"
 WEEK = "2026-W37"
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -84,8 +80,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["timesheets"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_keeps_to_the_platform(self, agents):
         """Nothing here leaves the platform; the workbook is the one

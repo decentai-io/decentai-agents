@@ -5,13 +5,13 @@ a folded supplier list and a child page, and "Board minutes", which
 exists but was not shared with the integration.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.notion_stub import NotionStub
 
 TASKS_SCHEMA = {
@@ -23,10 +23,6 @@ TASKS_SCHEMA = {
     "Signed off": "checkbox",
     "Budget": "number",
 }
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 class Workspace:
@@ -81,7 +77,7 @@ def ws():
 def executor(ws, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"notion__notion": ws.stub.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -99,8 +95,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["notion"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_every_change_to_the_workspace_is_level_three(self, agents):
         functions = {f"{t['id']}.{f['id']}": f
@@ -116,7 +113,7 @@ class TestThePackage:
         assert [n for n, f in functions.items() if f.get("schedulable")] == ["watch.changes"]
 
     def test_the_sign_in_is_declared_the_way_notion_wants_it(self, agents):
-        oauth = agents["notion"].manifest.resource("secrets", "notion")["oauth"]
+        oauth = resource(agents["notion"].manifest, "secrets", "notion")["oauth"]
         assert oauth["provider"] == "notion"
         assert (oauth["token_auth"], oauth["token_format"]) == ("basic", "json")
         assert oauth["authorize_params"] == {"owner": "user"}
@@ -507,7 +504,7 @@ class TestTheConnection:
         assert provider.data == {} and ws.stub.created == []
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result = ok(invoke(agents, ex, "notion.account.status", {}))
         assert result["connected"] is False
         assert "No Notion workspace" in result["problem"]

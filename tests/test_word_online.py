@@ -5,7 +5,6 @@ two runs with a comment from Dana on it, a price table — and a returns
 policy.
 """
 
-import asyncio
 import base64
 import io
 import random
@@ -15,8 +14,10 @@ import pytest
 from docx.oxml.ns import qn
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_word_stub import GraphWordStub
 
 DANA = "dana@harbourline.example"
@@ -25,10 +26,6 @@ TEN_DAYS = "Delivery takes ten working days from the signed order."
 SCOPES = ["openid", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send",
           "Calendars.ReadWrite", "Files.ReadWrite.All", "Chat.ReadWrite", "Team.ReadBasic.All",
           "Channel.ReadBasic.All", "ChannelMessage.Send", "Tasks.ReadWrite"]
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 def proposal(comments=(("Dana Harbour", "Can this be ten days?"),), delivery=DELIVERY,
@@ -83,7 +80,7 @@ def graph():
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"word_online__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=0):
@@ -95,11 +92,12 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["word_online"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_asks_microsoft_for_the_shared_scope_list(self, agents):
-        oauth = agents["word_online"].manifest.resource("secrets", "microsoft")["oauth"]
+        oauth = resource(agents["word_online"].manifest, "secrets", "microsoft")["oauth"]
         assert oauth["scopes"] == SCOPES
 
     def test_what_each_function_costs(self, agents):
@@ -346,7 +344,7 @@ class TestTheConnection:
         assert provider.data == {} and graph.puts == []
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "word_online.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Microsoft account" in result["problem"]

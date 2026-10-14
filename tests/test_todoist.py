@@ -5,21 +5,18 @@ a fictional task list for Sidra Office Supplies: an Inbox, a shared
 "today" and "overdue" are.
 """
 
-import asyncio
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.todoist_stub import TodoistStub
 
 TODAY = date.today()
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -48,7 +45,7 @@ def todoist():
 
 def executor(todoist, access_token="tk-1"):
     provider = InMemoryResourceProvider(secrets={"todoist__todoist": todoist.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -60,8 +57,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["todoist"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_levels_are_what_the_actions_cost(self, agents):
         doc = agents["todoist"].manifest.document
@@ -77,7 +75,7 @@ class TestThePackage:
         assert completed["schedulable"] is True and not completed.get("llm")
 
     def test_the_secret_signs_in_with_commas_between_scopes(self, agents):
-        secret = agents["todoist"].manifest.resource("secrets", "todoist")
+        secret = resource(agents["todoist"].manifest, "secrets", "todoist")
         assert secret["oauth"]["provider"] == "todoist"
         assert secret["oauth"]["scope_separator"] == ","
         assert secret["oauth"]["scopes"] == ["data:read_write", "data:delete"]
@@ -339,7 +337,7 @@ class TestTheConnection:
         assert todoist.writes == []
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "todoist.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Todoist account" in result["problem"]

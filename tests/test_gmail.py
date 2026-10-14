@@ -3,12 +3,12 @@ over the real wire, against a loopback Gmail holding fictional mail
 for Sidra Office Supplies.
 """
 
-import asyncio
 import base64
 
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.gmail_stub import GmailStub
@@ -16,10 +16,6 @@ from tests.gmail_stub import GmailStub
 SUPPLIER = "quotes@northlight-seating.example"
 QUOTE_PDF = b"%PDF-1.4 fictional quotation " + bytes(range(256))
 CUSTOMER = "dana@harbourline.example"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -40,7 +36,7 @@ def gmail():
 
 def executor(gmail, access_token="at-1"):
     provider = InMemoryResourceProvider(secrets={"gmail__google": gmail.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -52,8 +48,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["gmail"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_account_reports_its_address(self, agents, gmail):
         ex, _ = executor(gmail)
@@ -82,7 +79,7 @@ class TestSeveralAccounts:
              "keys": {"account": self.OTHER, "status": "connected"},
              "values": second},
         ]})
-        return FunctionExecutor(provider=provider), provider
+        return FunctionExecutor(workers(), provider=provider), provider
 
     def test_the_accounts_are_listed_without_a_token(self, agents, gmail):
         ex, _ = self.executor(gmail)
@@ -440,7 +437,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "gmail.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google account" in result["problem"]

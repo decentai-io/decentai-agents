@@ -3,13 +3,13 @@ lists from Sidra Office Supplies — one from the accounting export, one from
 the sales sheet — with the usual mess: duplicates, a missing phone,
 an identifier with leading zeros, a formula, a date."""
 
-import asyncio
 import io
 from datetime import date
 
 from openpyxl import Workbook, load_workbook
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 CUSTOMERS_CSV = """Customer ID,Name,Email,Phone,Country
@@ -40,13 +40,9 @@ def sales_xlsx() -> bytes:
     return buffer.getvalue()
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make():
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=2):
@@ -62,8 +58,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["sheets"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
 
 class TestAskingForColumnsByName:

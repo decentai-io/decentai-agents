@@ -176,8 +176,10 @@ The two PDFs under `documents/samples/` are made by
 ## Run the tests
 
 The tests run the agent the way production does — in its own worker
-process, over the worker protocol — against DecentAI's simulated
-resources, so they need a checkout of [the platform](https://github.com/decentai-io/decentai) beside this one and
+process, over the worker protocol, behind the platform's confinement
+and its egress proxy (a fake of the agents' container, the one the
+platform's own tests use) — against DecentAI's simulated resources, so
+they need a checkout of [the platform](https://github.com/decentai-io/decentai) beside this one and
 its code on the path. Python 3.11 or later:
 
 ```bash

@@ -3,11 +3,11 @@ renewing on 1 December with 60 days' notice, an agreement whose
 clause says "December" and "sixty (60) days" and nothing more, and
 the difference between a reminder and a cancellation."""
 
-import asyncio
 import json
 
 from ai_runtime.execution.executor import FunctionExecutor
 from ai_runtime.execution.sinks import ChatSinks
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 AGREEMENT_TEXT = """SERVICE AGREEMENT between Meridian Furnishings LLC ("Customer") and Cloudledger Ltd ("Provider").
@@ -19,13 +19,9 @@ AGREEMENT_TEXT = """SERVICE AGREEMENT between Meridian Furnishings LLC ("Custome
 """
 
 
-def run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def make(llm=None):
     provider = InMemoryResourceProvider()
-    return FunctionExecutor(provider=provider, sinks=ChatSinks(llm=llm)), provider
+    return FunctionExecutor(workers(), provider=provider, sinks=ChatSinks(llm=llm)), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -52,8 +48,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["tasks"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
 
 class TestTwoDates:

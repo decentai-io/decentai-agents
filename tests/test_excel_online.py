@@ -5,13 +5,13 @@ count too long to read in one go, and a notes document that is not a
 workbook at all.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_workbook_stub import GraphWorkbookStub
 
 HEADERS = ["Order", "Customer", "Item", "Amount", "Due"]
@@ -24,10 +24,6 @@ SCOPES = ["openid", "email", "offline_access", "User.Read", "Mail.ReadWrite",
           "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite.All", "Chat.ReadWrite",
           "Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Send",
           "Tasks.ReadWrite"]
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -50,7 +46,7 @@ def graph():
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"excel_online__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -68,12 +64,13 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["excel_online"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_one_connection_serves_both_workbook_agents(self, agents):
-        mine = agents["excel_online"].manifest.resource("secrets", "microsoft")
-        theirs = agents["microsoft_forms"].manifest.resource("secrets", "microsoft")
+        mine = resource(agents["excel_online"].manifest, "secrets", "microsoft")
+        theirs = resource(agents["microsoft_forms"].manifest, "secrets", "microsoft")
         assert mine["oauth"]["scopes"] == SCOPES
         assert theirs["oauth"] == mine["oauth"]
         assert theirs["fields"] == mine["fields"]
@@ -97,7 +94,7 @@ class TestThePackage:
             "connected": True, "email": GraphWorkbookStub.ACCOUNT}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result = ok(invoke(agents, ex, "excel_online.account.status", {}))
         assert result["connected"] is False
         assert "No Microsoft account" in result["problem"]

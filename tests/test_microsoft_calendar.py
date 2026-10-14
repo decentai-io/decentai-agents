@@ -4,23 +4,19 @@ Dubai time, which the mailbox reports as "Arabian Standard Time"; Dana's
 calendar is shared with the account, Omar's is outside the organization.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.graph_calendar_stub import GraphCalendarStub
 
 DANA = "dana@sidra.example"
 OMAR = "omar@harbourline.example"
 SUPPLIER = "quotes@northlight-seating.example"
 TZ = "+04:00"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -40,7 +36,7 @@ def graph():
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"microsoft_calendar__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -62,15 +58,16 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["microsoft_calendar"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_one_connection_serves_outlook_and_the_calendar(self, agents):
         """One saved Microsoft account must be grantable to both, which
         needs the same fields — and one consent must cover both, which
         needs the same scopes."""
-        mail = agents["outlook"].manifest.resource("secrets", "microsoft")
-        cal = agents["microsoft_calendar"].manifest.resource("secrets", "microsoft")
+        mail = resource(agents["outlook"].manifest, "secrets", "microsoft")
+        cal = resource(agents["microsoft_calendar"].manifest, "secrets", "microsoft")
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
         assert strip(mail["fields"]) == strip(cal["fields"])

@@ -5,18 +5,14 @@ Microsoft To Do agent's suite: the contracts are the same, the wire is
 not.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.gtasks_stub import TasksStub
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -41,7 +37,7 @@ def gtasks():
 def executor(gtasks, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"google_tasks__google": gtasks.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -53,13 +49,14 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_tasks"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_secret_has_the_same_shape_as_the_gmail_agents(self, agents):
         """One saved Google credential must be grantable to both."""
-        mail = agents["gmail"].manifest.resource("secrets", "google")["fields"]
-        tasks = agents["google_tasks"].manifest.resource("secrets", "google")["fields"]
+        mail = resource(agents["gmail"].manifest, "secrets", "google")["fields"]
+        tasks = resource(agents["google_tasks"].manifest, "secrets", "google")["fields"]
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
         assert strip(mail) == strip(tasks)
@@ -336,7 +333,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "google_tasks.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google account" in result["problem"]

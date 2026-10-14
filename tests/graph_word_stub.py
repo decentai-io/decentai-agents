@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
+from tests.conftest import stands_for
+
 EPOCH = datetime(2026, 9, 10, 9, 0, 0, tzinfo=timezone.utc)
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -174,7 +176,7 @@ class GraphWordStub:
     @property
     def url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return stands_for("graph.microsoft.com", self._server)
 
     def secret(self, access_token: str = "at-1") -> Dict[str, Any]:
         """The credential as the platform hands it to the agent."""

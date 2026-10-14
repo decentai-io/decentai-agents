@@ -4,13 +4,13 @@ heading, a delivery paragraph, a price table and a logo, and a supplier
 handbook edited earlier.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.gdocs_stub import GoogleDocsStub
 
 DANA = "Dana Harbour"
@@ -27,10 +27,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/forms.responses.readonly",
     "https://www.googleapis.com/auth/tasks",
 ]
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -56,7 +52,7 @@ def docs():
 def executor(docs, access_token="at-1"):
     provider = InMemoryResourceProvider(
         secrets={"google_docs__google": docs.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=0):
@@ -68,11 +64,12 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_docs"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_it_asks_google_for_the_shared_scope_list(self, agents):
-        oauth = agents["google_docs"].manifest.resource("secrets", "google")["oauth"]
+        oauth = resource(agents["google_docs"].manifest, "secrets", "google")["oauth"]
         assert oauth["scopes"] == SCOPES
 
     def test_what_each_function_costs(self, agents):
@@ -372,7 +369,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "google_docs.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google account" in result["problem"]

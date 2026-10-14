@@ -9,19 +9,15 @@ The proxy here is the platform's own, run by the test; its lookup is a
 table, so the shop has a name and another name resolves inside.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.agents.egress import EgressProxy
+from ai_runtime.tests.fake_container import confinement, run
 
+from tests.conftest import declaring
 from tests.test_browser import browse, make, shop  # noqa: F401
 
 INSIDE = "inside.sidra.example"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 def port_of(shop):
@@ -29,23 +25,18 @@ def port_of(shop):
 
 
 @pytest.fixture
-def proxy(shop, monkeypatch):
+def proxy(agents, shop, monkeypatch):
+    """The test's own confinement's proxy, with a lookup table of its
+    own; ``admitted`` runs the agent as if it declared these hosts and
+    no others."""
     names = {INSIDE: ["10.0.0.5"]}
     monkeypatch.setattr(
         EgressProxy, "resolver",
         staticmethod(lambda host, port: names.get(host, ["127.0.0.1"])))
-    found = EgressProxy(0, allow_loopback=True)
-    assert found.start() == []
-
-    def admitted(hosts):
-        token = found.admit("Browser", {
-            "declared": True, "any": hosts == "any",
-            "hosts": [] if hosts == "any" else hosts, "from_secrets": []})
-        monkeypatch.setenv("DECENTAI_PROXY", found.address(token))
-
-    found.admitted = admitted
-    yield found
-    found.stop()
+    found = confinement().proxy
+    found.admitted = lambda hosts: monkeypatch.setitem(
+        agents, "browser", declaring(agents["browser"], hosts))
+    return found
 
 
 class TestThePolicy:

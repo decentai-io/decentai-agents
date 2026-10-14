@@ -3,22 +3,18 @@ Calendar. The week is 7–11 September 2026 (Monday to Friday), Dubai
 time; Dana's calendar is shared, Omar's is not.
 """
 
-import asyncio
-
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.gcal_stub import CalendarStub
 
 DANA = "dana@harbourline.example"
 OMAR = "omar@harbourline.example"
 TZ = "+04:00"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -37,7 +33,7 @@ def gcal():
 
 def executor(gcal, access_token="at-1"):
     provider = InMemoryResourceProvider(secrets={"google_calendar__google": gcal.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -53,14 +49,15 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_calendar"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_secret_has_the_same_shape_as_the_gmail_agents(self, agents):
         """One saved Google credential must be grantable to both agents,
         which the platform allows only when the fields match exactly."""
-        mail = agents["gmail"].manifest.resource("secrets", "google")["fields"]
-        cal = agents["google_calendar"].manifest.resource("secrets", "google")["fields"]
+        mail = resource(agents["gmail"].manifest, "secrets", "google")["fields"]
+        cal = resource(agents["google_calendar"].manifest, "secrets", "google")["fields"]
         strip = lambda fields: [{k: f[k] for k in ("name", "type", "storage", "required")}
                                 for f in fields]
         assert strip(mail) == strip(cal)

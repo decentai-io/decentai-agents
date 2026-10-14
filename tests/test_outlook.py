@@ -4,12 +4,12 @@ fictional mail for Sidra Office Supplies. The same cases
 as the Gmail agent's suite: the contracts are the same, the wire is not.
 """
 
-import asyncio
 import base64
 
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
 from tests.graph_stub import GraphStub
@@ -17,10 +17,6 @@ from tests.graph_stub import GraphStub
 SUPPLIER = "quotes@northlight-seating.example"
 QUOTE_PDF = b"%PDF-1.4 fictional quotation " + bytes(range(256))
 CUSTOMER = "dana@harbourline.example"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -41,7 +37,7 @@ def graph():
 
 def executor(graph, access_token="at-1"):
     provider = InMemoryResourceProvider(secrets={"outlook__microsoft": graph.secret(access_token)})
-    return FunctionExecutor(provider=provider), provider
+    return FunctionExecutor(workers(), provider=provider), provider
 
 
 def invoke(agents, ex, name, inputs, chat_level=1):
@@ -53,8 +49,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["outlook"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_the_account_reports_its_address(self, agents, graph):
         ex, _ = executor(graph)
@@ -83,7 +80,7 @@ class TestSeveralAccounts:
              "keys": {"account": self.OTHER, "status": "connected"},
              "values": second},
         ]})
-        return FunctionExecutor(provider=provider), provider
+        return FunctionExecutor(workers(), provider=provider), provider
 
     def test_the_accounts_are_listed_without_a_token(self, agents, graph):
         ex, _ = self.executor(graph)
@@ -481,7 +478,7 @@ class TestTheConnection:
         assert provider.data == {}
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "outlook.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Microsoft account" in result["problem"]

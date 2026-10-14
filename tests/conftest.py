@@ -3,9 +3,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from ai_runtime.agents.egress import EgressProxy
 from ai_runtime.agents.environments import AgentEnvironment
 from ai_runtime.agents.library import InstalledAgent
 from contracts.agent_manifest import load_manifest
+from decentai_sdk.manifest import Manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,11 +68,45 @@ def agents():
 
 
 @pytest.fixture(autouse=True)
-def _reap_worker_pools():
-    """Workers spawned during a test die with it — each test's executors
-    own private WorkerPools whose processes would otherwise outlive the
-    test's event loop."""
-    yield
-    from ai_runtime.agents.pool import WorkerPool
+def _agents_container(tmp_path, monkeypatch):
+    """Each test runs as the runtime's own tests do: on one loop, over
+    a fake of the agents' container with a confinement of its own, so
+    workers, the proxy and the loop all end with the test.
 
-    WorkerPool.terminate_all()
+    The proxy opens the names an agent declared and nothing written as
+    an address, so a stub stands under the service's own name
+    (``stands_for``): every name resolves to this machine, where the
+    stubs are, and a stub's port counts as one the web answers on."""
+    from ai_runtime.tests import fake_container
+
+    fake_container.begin(tmp_path / "agents")
+    monkeypatch.setattr(EgressProxy, "resolver",
+                        staticmethod(lambda host, port: ["127.0.0.1"]))
+    monkeypatch.setattr(EgressProxy, "PORTS_OF_A_NAMED_HOST", [443, 80])
+    yield
+    fake_container.end()
+
+
+def stands_for(host: str, server) -> str:
+    """The address a stub gives out while it stands in for a service:
+    the name the agent declared, on the port the stub listens on."""
+    port = server.server_address[1]
+    if port not in EgressProxy.PORTS_OF_A_NAMED_HOST:
+        EgressProxy.PORTS_OF_A_NAMED_HOST.append(port)
+    return f"http://{host}:{port}"
+
+
+def resource(manifest: Manifest, kind: str, resource_id: str) -> dict:
+    """One declared resource of the manifest's, by kind and id."""
+    return next(r for r in manifest.resources(kind) if r["id"] == resource_id)
+
+
+def declaring(agent: InstalledAgent, hosts) -> InstalledAgent:
+    """The agent as if its manifest declared these hosts: ``"any"``,
+    or names with ``:<port>`` where the port is not the web's. For
+    what the proxy does with a declaration, where a test's stub is not
+    where the real service would be."""
+    network = {"hosts": "any" if hosts == "any" else list(hosts)}
+    document = {**agent.manifest.document, "network": network}
+    return InstalledAgent(agent.digest, Manifest(document), agent.folder,
+                          agent.environment)

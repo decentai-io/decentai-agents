@@ -3,7 +3,6 @@ Google Maps Platform (tests/maps_stub.py). The places are fictional,
 around a fictional Dubai Marina and an office in Abu Dhabi.
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -11,17 +10,15 @@ import pytest
 import requests
 
 from ai_runtime.execution.executor import FunctionExecutor
+from ai_runtime.tests.fake_container import confinement, run, workers
 from sim.resources import InMemoryResourceProvider
 
+from tests.conftest import resource
 from tests.maps_stub import MapsStub
 
 MARINA = {"lat": 25.0800, "lng": 55.1400}
 SEARCH, NEARBY = "/places:searchText", "/places:searchNearby"
 MATRIX, ROUTES = "/distanceMatrix/v2:computeRouteMatrix", "/directions/v2:computeRoutes"
-
-
-def run(awaitable):
-    return asyncio.run(awaitable)
 
 
 @pytest.fixture
@@ -33,7 +30,7 @@ def maps():
 
 def executor(maps, api_key="test-key"):
     provider = InMemoryResourceProvider(secrets={"places__maps": maps.secret(api_key)})
-    return FunctionExecutor(provider=provider)
+    return FunctionExecutor(workers(), provider=provider)
 
 
 def invoke(agents, ex, name, inputs):
@@ -50,8 +47,9 @@ class TestThePackage:
         from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["places"]
-        assert WorkerHandle.probe(agent.environment.python, agent.folder,
-                                  agent.manifest.document) == []
+        assert run(WorkerHandle.probe(
+            agent.environment.python, agent.folder, agent.manifest.document,
+            confinement().verification_place())) == []
 
     def test_every_function_is_a_read(self, agents):
         levels = {f["permission_level"] for t in agents["places"].manifest.document["tools"]
@@ -59,7 +57,7 @@ class TestThePackage:
         assert levels == {0}
 
     def test_the_key_is_typed_in_and_encrypted(self, agents):
-        maps = agents["places"].manifest.resource("secrets", "maps")
+        maps = resource(agents["places"].manifest, "secrets", "maps")
         assert "oauth" not in maps
         fields = {f["name"]: (f["type"], f["storage"], f["required"]) for f in maps["fields"]}
         assert fields == {"api_key": ("secret", "values", True),
@@ -100,7 +98,7 @@ class TestTheKey:
         assert "Places API (New) is not enabled" in result["error"]
 
     def test_no_credential_is_a_plain_answer(self, agents):
-        ex = FunctionExecutor(provider=InMemoryResourceProvider())
+        ex = FunctionExecutor(workers(), provider=InMemoryResourceProvider())
         result, status = invoke(agents, ex, "places.account.status", {})
         assert status == "success" and result["connected"] is False
         assert "No Google Maps Platform key" in result["problem"]
@@ -113,7 +111,7 @@ class TestFieldMasks:
     def test_the_stub_refuses_a_request_without_a_mask(self, maps):
         """Google refuses a request with no field mask; so does the stub —
         it never answers such a request with everything."""
-        answer = requests.post(maps.url + SEARCH, json={"textQuery": "coffee"},
+        answer = requests.post(maps.direct + SEARCH, json={"textQuery": "coffee"},
                                headers={"X-Goog-Api-Key": "test-key"}, timeout=5)
         assert answer.status_code == 400
         assert "FieldMask is a required parameter" in answer.json()["error"]["message"]
@@ -121,7 +119,7 @@ class TestFieldMasks:
     def test_the_stub_returns_only_the_fields_a_mask_names(self, maps):
         """So a field the client forgets to name is missing from its
         answer, and that function's own test fails."""
-        answer = requests.post(maps.url + SEARCH, json={"textQuery": "Marina Brew House"},
+        answer = requests.post(maps.direct + SEARCH, json={"textQuery": "Marina Brew House"},
                                headers={"X-Goog-Api-Key": "test-key",
                                         "X-Goog-FieldMask": "places.displayName"}, timeout=5)
         assert answer.status_code == 200
