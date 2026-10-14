@@ -47,7 +47,7 @@ def tomorrow_at_eight():
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["places"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

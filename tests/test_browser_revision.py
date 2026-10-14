@@ -13,7 +13,7 @@ import re
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import VISITOR

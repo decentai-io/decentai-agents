@@ -81,7 +81,7 @@ def log(agents, ex, code, day, hours, note=""):
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["timesheets"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

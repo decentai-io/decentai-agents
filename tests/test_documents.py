@@ -10,7 +10,7 @@ import json
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 def scanned_pdf() -> bytes:
@@ -95,7 +95,7 @@ def quotes(agents):
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["documents"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

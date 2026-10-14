@@ -50,7 +50,7 @@ WEEK = {"from_date": "2026-09-07", "to_date": "2026-09-11",
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["google_calendar"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

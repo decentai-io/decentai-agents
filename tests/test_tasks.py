@@ -6,7 +6,7 @@ import asyncio
 import json
 
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 NOTES = """Ops meeting, 7 September 2026. Present: Sami, Dana, Omar.
@@ -34,7 +34,7 @@ def invoke(agents, ex, name, inputs, chat_level=1):
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["tasks"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

@@ -51,7 +51,7 @@ def rows_of(result):
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["connection_check"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,

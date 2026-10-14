@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ai_runtime.agents import AgentEnvironment, InstalledAgent
+from ai_runtime.agents.environments import AgentEnvironment
+from ai_runtime.agents.library import InstalledAgent
 from contracts.agent_manifest import load_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,14 +33,29 @@ def agents():
 
     environment = AgentEnvironment(WORKERENV_DIR)
     if not environment.exists():
+        # Built as a runtime builds one: in a builder's place of a
+        # stand-alone container, with the union of the agents' declared
+        # dependencies.
+        from ai_runtime.tests.fake_container import standalone
+
         dependencies = [d for _, m in entries for d in m.dependencies]
-        errors = environment.build(dependencies)
+        with standalone(WORKERENV_DIR.parent / ".workerenv-build") as own:
+            errors = own.run(environment.build(
+                dependencies, own.confinement.builder_place()))
         assert errors == [], errors
     else:
         # The platform's SDK moves on; an environment built last week
         # carries last week's. Brought up to date as a runtime does it
         # before it starts a worker.
-        assert environment.refresh_sdk() == []
+        import shutil
+
+        import decentai_sdk
+
+        target = environment._site_packages()
+        assert target is not None, "the cached venv has no site-packages"
+        shutil.copytree(Path(decentai_sdk.__file__).resolve().parent,
+                        target / "decentai_sdk", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
 
     return {
         manifest.agent_id: InstalledAgent(
@@ -55,6 +71,6 @@ def _reap_worker_pools():
     own private WorkerPools whose processes would otherwise outlive the
     test's event loop."""
     yield
-    from ai_runtime.agents.worker_pool import WorkerPool
+    from ai_runtime.agents.pool import WorkerPool
 
     WorkerPool.terminate_all()

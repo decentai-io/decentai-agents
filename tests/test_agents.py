@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +34,7 @@ def test_the_catalog_offers_one_agent_that_implements_its_manifest(agents):
     """Verified the way installation verifies: a worker spawned from the
     agent's own environment imports the code and checks every declared
     function has a method."""
-    from ai_runtime.agents.worker_handle import WorkerHandle
+    from ai_runtime.agents.workers import WorkerHandle
 
     assert set(agents) == {"notebook", "gmail", "google_calendar", "google_drive", "google_sheets", "google_forms", "google_tasks", "microsoft_calendar", "microsoft_todo", "outlook", "onedrive", "excel_online", "microsoft_forms", "dropbox", "box", "teams", "slack", "notion", "documents", "tasks", "todoist", "timesheets", "sheets", "expenses", "places", "google_docs", "word_online", "web_reader", "web_watch", "browser", "feeds", "applications", "slides", "json_data", "connection_check", "mail", "code_runner"}
     agent = agents["notebook"]

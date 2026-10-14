@@ -55,7 +55,7 @@ def invoke(agents, ex, name, inputs, chat_level=2):
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["web_reader"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,
@@ -395,6 +395,28 @@ class TestBehindThePlatformsProxy:
         assert status == "error", result
         assert result["kind"] == "forbidden"
         assert "private network address" in result["error"]
+
+    def test_a_refusal_whose_reason_holds_an_apostrophe_is_still_read(
+            self, agents, web, proxy, monkeypatch):
+        """On https:// the proxy's reason arrives inside an exception's
+        text, quoted by Python — with double quotes when the reason
+        itself holds an apostrophe, as "this machine's own address"
+        does. The agent reads it either way."""
+        from ai_runtime.agents.egress import EgressProxy
+
+        strict = EgressProxy(0, allow_loopback=False)
+        assert strict.start() == []
+        try:
+            monkeypatch.setenv("DECENTAI_PROXY", strict.address(strict.admit(
+                "Web Reader", {"declared": True, "any": True, "hosts": [], "from_secrets": []})))
+            ex, _ = make()
+            result, status = invoke(agents, ex, "web_reader.pages.read", {
+                "url": "https://local.harbourline.example/admin"})
+            assert status == "error", result
+            assert result["kind"] == "forbidden", result
+            assert "own address" in result["error"], result
+        finally:
+            strict.stop()
 
     def test_an_address_written_as_one_is_refused_before_it_is_asked(
             self, agents, web, proxy):

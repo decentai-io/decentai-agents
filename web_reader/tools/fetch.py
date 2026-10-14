@@ -60,7 +60,7 @@ PROXY_VARIABLE = "DECENTAI_PROXY"
 REFUSED_HEADER = "X-DecentAI-Refused"
 #: What a client says of a tunnel the proxy refused: the proxy's
 #: status, and its reason in its own words.
-REFUSED_TUNNEL = re.compile(r"Tunnel connection failed: (\d{3}) (.*?)'\)")
+REFUSED_TUNNEL = re.compile(r"Tunnel connection failed: (\d{3}) (.*?)['\"]\)")
 
 
 class FetchError(Exception):

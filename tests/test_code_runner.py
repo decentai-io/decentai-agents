@@ -12,7 +12,7 @@ import yaml
 
 from ai_runtime.agents.environments import AgentEnvironment
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 ROOT = Path(__file__).resolve().parents[1]

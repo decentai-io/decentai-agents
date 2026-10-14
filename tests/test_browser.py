@@ -15,7 +15,7 @@ import re
 import pytest
 
 from ai_runtime.execution.executor import FunctionExecutor
-from ai_runtime.sinks import ChatSinks
+from ai_runtime.execution.sinks import ChatSinks
 from sim.resources import InMemoryResourceProvider
 
 from tests.browser_site import ACCOUNT, PASSWORD, ShopSite
@@ -379,7 +379,7 @@ class TestCircling:
 
 class TestThePackage:
     def test_the_worker_verifies_every_declared_function(self, agents):
-        from ai_runtime.agents.worker_handle import WorkerHandle
+        from ai_runtime.agents.workers import WorkerHandle
 
         agent = agents["browser"]
         assert WorkerHandle.probe(agent.environment.python, agent.folder,
@@ -721,11 +721,15 @@ class TestShopping:
         step; taking the browser in the live view pauses the run until
         it is handed back, and the model is told to look again."""
         executor, provider, mind, person = make(shop)
-        seen = {"call_id": "", "steered": False}
+        seen = {"call_id": "", "steered": False, "paused": None}
 
         async def progress(text, source):
             await _progress(text, source)
             call_id = str(source.get("call_id") or "")
+            if seen["paused"] is None:
+                seen["paused"] = asyncio.Event()
+            if text == "The person took the browser":
+                seen["paused"].set()
             if text == "login" and not seen["steered"]:
                 seen["steered"] = True
                 seen["call_id"] = call_id
@@ -735,7 +739,11 @@ class TestShopping:
                 ])
 
                 async def hand_back():
-                    await asyncio.sleep(1.0)
+                    # Only once the run has paused for the person: a
+                    # fixed wait raced the login act, which is as long
+                    # as the page takes, and the hand-back landed on
+                    # either side of the pause.
+                    await asyncio.wait_for(seen["paused"].wait(), timeout=30)
                     # While they hold it, the person goes to the items
                     # page themselves; the run is told in words.
                     await executor.screen_input(call_id, [
