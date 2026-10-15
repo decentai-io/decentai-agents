@@ -16,7 +16,7 @@ schema_version: "1.0"
 agent:
   id: todoist
   name: Todoist
-  version: "0.1.2"
+  version: "0.1.3"
   description: >
     Your Todoist, read and kept through the assistant. See what is due
     today or overdue, add a task to the right project with a date and
@@ -88,8 +88,8 @@ resources:
       binding: {cardinality: one, required: true}
       oauth:
         provider: todoist
-        authorize_url: https://todoist.com/oauth/authorize
-        token_url: https://todoist.com/oauth/access_token
+        authorize_url: https://app.todoist.com/oauth/authorize
+        token_url: https://api.todoist.com/oauth/access_token
         # Todoist joins scopes with commas; its tokens do not expire.
         scope_separator: ","
         scopes:
