@@ -316,6 +316,55 @@ class TestSigningIn:
         assert not any(COMPANY in p for p in mind.prompts)
 
 
+class TestAPageOnItsWay:
+    def test_a_page_being_replaced_is_waited_for_and_read_again(self):
+        """A sign-in form posts and the site redirects to the next page.
+        The click's wait can end on the old page before the redirect
+        starts, so the snapshot meets a page being replaced, which
+        cannot be read. That happened in CI: the model was shown no
+        fields on the password page and gave up. The driver waits for
+        the new page and reads it again."""
+        from browser.tools.driver import Driver
+
+        class Replacing:
+            url = "http://shop.test/login/password"
+
+            def __init__(self, fails):
+                self.fails, self.reads = fails, 0
+
+            async def evaluate(self, script, *args):
+                if "dai-marks" in script and not args:
+                    return None  # taking the marks down
+                self.reads += 1
+                if self.reads <= self.fails:
+                    raise RuntimeError("Execution context was destroyed, "
+                                       "most likely because of a navigation")
+                return {"elements": [{"n": 1, "tag": "input", "type": "password"}],
+                        "text": "Password", "frames": [], "scroll": [0, 0, 800]}
+
+            async def screenshot(self, **_):
+                return b"jpeg"
+
+            async def title(self):
+                return "Sign in"
+
+            async def wait_for_load_state(self, *_args, **_kw):
+                return None
+
+        driver = Driver()
+        driver.page = Replacing(fails=1)
+        shot = asyncio.run(driver.snapshot())
+        assert driver.page.reads == 2
+        assert [e["type"] for e in shot.elements] == ["password"]
+
+        # A page that never becomes readable is said to be unreadable,
+        # after a bounded number of tries — not waited on for ever.
+        driver.page = Replacing(fails=99)
+        shot = asyncio.run(driver.snapshot())
+        assert shot.elements == [] and "could not be read" in shot.text
+        assert driver.page.reads == 3
+
+
 class TestAnUnreadableAnswer:
     def test_a_cut_reply_is_an_invalid_action_that_says_so(self):
         """The platform's Completion says when a token cap cut the

@@ -38,6 +38,9 @@ TABS_MAX = 20
 TABS_FRESH_SECONDS = 1.0
 #: How long a click is given to open its new tab, if it opens one.
 NEW_TAB_SECONDS = 0.25
+#: Reads of a page before it is shown as unreadable: one being replaced
+#: by the next (a redirect after a form) is waited for and read again.
+READ_ATTEMPTS = 3
 
 #: Finds what a person could act on in the viewport, numbers it, and
 #: draws the number on it. Returns the elements as data; the marks stay
@@ -342,16 +345,30 @@ class Driver:
         except Exception:
             pass
 
+    async def _read(self, page, marks: bool) -> Dict[str, Any]:
+        if marks:
+            return await page.evaluate(MARK_JS, MARKS_MAX)
+        return {"elements": [], "text": await page.evaluate("() => document.body ? document.body.innerText : ''"),
+                "frames": [], "scroll": [0, 0, VIEWPORT[1]]}
+
     async def snapshot(self, marks: bool = True) -> Snapshot:
         """The page as the model sees it: marked picture, elements, words."""
         page = self.page
-        try:
-            found = await page.evaluate(MARK_JS, MARKS_MAX) if marks else {
-                "elements": [], "text": await page.evaluate("() => document.body ? document.body.innerText : ''"),
-                "frames": [], "scroll": [0, 0, VIEWPORT[1]]}
-        except Exception as exc:
-            found = {"elements": [], "text": f"(the page could not be read: {exc})",
-                     "frames": [], "scroll": [0, 0, VIEWPORT[1]]}
+        found = None
+        for attempt in range(READ_ATTEMPTS):
+            try:
+                found = await self._read(page, marks)
+                break
+            except Exception as exc:
+                # A form sent a moment ago may still be on its way to
+                # the next page — a redirect after a sign-in, say — and
+                # a page being replaced cannot be read. Wait for the new
+                # one and look again, rather than show the model nothing.
+                if attempt + 1 < READ_ATTEMPTS:
+                    await self.settle(1.0)
+                    continue
+                found = {"elements": [], "text": f"(the page could not be read: {exc})",
+                         "frames": [], "scroll": [0, 0, VIEWPORT[1]]}
         try:
             image = await page.screenshot(type="jpeg", quality=65)
         except Exception:
